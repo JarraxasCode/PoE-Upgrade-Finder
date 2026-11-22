@@ -1,0 +1,14 @@
+{
+  "name": "@poe-upgrade-finder/validate",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runtime checks for JSON at the boundaries (engine messages, trade responses, currency digests).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

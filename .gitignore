@@ -1,0 +1,14 @@
+node_modules/
+dist/
+out/
+build/
+*.log
+logs/
+.env
+.env.*
+*.zip
+.DS_Store
+Thumbs.db
+engine/host/bin/
+engine/pob/
+.publish-target

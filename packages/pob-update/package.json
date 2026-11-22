@@ -1,0 +1,17 @@
+{
+  "name": "@poe-upgrade-finder/pob-update",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Updates the engine's PoB copy to a PoB Community release: manifest diff by sha1, a staging copy, fetch by commit sha from raw GitHub.",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@poe-upgrade-finder/validate": "0.1.0"
+  }
+}

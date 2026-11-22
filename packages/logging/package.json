@@ -1,0 +1,15 @@
+{
+  "name": "@poe-upgrade-finder/logging",
+  "version": "0.1.0",
+  "private": true,
+  "description": "JSON Lines logger: per-day and per-run files, retention, redaction, debug toggle (PLAN.md, Logging).",
+  "license": "UNLICENSED",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json",
+    "test": "node --test \"test/**/*.test.ts\""
+  }
+}
