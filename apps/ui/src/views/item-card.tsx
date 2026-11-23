@@ -10,11 +10,26 @@ import { anchorClass, hideTip, showInfo, showTip, tip } from '../state/tip.ts';
 import type { TipState } from '../state/tip.ts';
 
 const INFLUENCE_NAMES: Readonly<Record<string, string>> = {
-    shaper: 'Shaper', elder: 'Elder', crusader: 'Crusader', redeemer: 'Redeemer', hunter: 'Hunter', warlord: 'Warlord', searing: 'Searing Exarch', tangled: 'Eater of Worlds',
+    shaper: 'Shaper',
+    elder: 'Elder',
+    crusader: 'Crusader',
+    redeemer: 'Redeemer',
+    hunter: 'Hunter',
+    warlord: 'Warlord',
+    searing: 'Searing Exarch',
+    tangled: 'Eater of Worlds',
 };
 
 function Line(props: { readonly line: ViewLine }): JSX.Element {
-    return <p>{props.line.map((p: ViewPart, k: number) => <span key={k} class={`t-${p.tone}`}>{p.text}</span>)}</p>;
+    return (
+        <p>
+            {props.line.map((p: ViewPart, k: number) => (
+                <span key={k} class={`t-${p.tone}`}>
+                    {p.text}
+                </span>
+            ))}
+        </p>
+    );
 }
 
 const SOCKET_NAMES: Readonly<Record<string, string>> = { R: 'red', G: 'green', B: 'blue', W: 'white', A: 'abyss', D: 'delve' };
@@ -26,7 +41,15 @@ function Sockets(props: { readonly sockets: string }): JSX.Element {
             <span class="t-label">Sockets: </span>
             {[...props.sockets].map((ch: string, k: number) => {
                 const name: string | undefined = SOCKET_NAMES[ch];
-                return name === undefined ? <span key={k} class="sock-link">{ch}</span> : <span key={k} class={`sock sock-${name}`} title={`${name} socket`}>{ch}</span>;
+                return name === undefined ? (
+                    <span key={k} class="sock-link">
+                        {ch}
+                    </span>
+                ) : (
+                    <span key={k} class={`sock sock-${name}`} title={`${name} socket`}>
+                        {ch}
+                    </span>
+                );
             })}
         </p>
     );
@@ -35,7 +58,11 @@ function Sockets(props: { readonly sockets: string }): JSX.Element {
 function Mods(props: { readonly mods: readonly ViewMod[] }): JSX.Element {
     return (
         <div class="ic-section">
-            {props.mods.map((m: ViewMod, k: number) => <p key={k} class={`m-${m.kind}`}>{m.text}</p>)}
+            {props.mods.map((m: ViewMod, k: number) => (
+                <p key={k} class={`m-${m.kind}`}>
+                    {m.text}
+                </p>
+            ))}
         </div>
     );
 }
@@ -53,25 +80,39 @@ export function ItemCard(props: { readonly view: ItemView; readonly image?: bool
     const v: ItemView = props.view;
     const head: ViewLine[] = [];
     if (v.influences.length > 0) {
-        head.push([{ text: 'Influence: ', tone: 'label' }, { text: v.influences.map((i) => INFLUENCE_NAMES[i] ?? i).join(', '), tone: 'plain' }]);
+        head.push([
+            { text: 'Influence: ', tone: 'label' },
+            { text: v.influences.map((i) => INFLUENCE_NAMES[i] ?? i).join(', '), tone: 'plain' },
+        ]);
     }
     const tail: ViewLine[] = [];
     if (v.itemLevel !== null) {
-        tail.push([{ text: 'Item Level: ', tone: 'label' }, { text: String(v.itemLevel), tone: 'plain' }]);
+        tail.push([
+            { text: 'Item Level: ', tone: 'label' },
+            { text: String(v.itemLevel), tone: 'plain' },
+        ]);
     }
     const sections: ComponentChildren[] = [];
     const top: ViewLine[] = [...v.properties, ...head];
     if (top.length > 0 || v.sockets !== '' || tail.length > 0) {
         sections.push(
             <div class="ic-section">
-                {top.map((l: ViewLine, k: number) => <Line key={k} line={l} />)}
+                {top.map((l: ViewLine, k: number) => (
+                    <Line key={k} line={l} />
+                ))}
                 {v.sockets !== '' && <Sockets sockets={v.sockets} />}
-                {tail.map((l: ViewLine, k: number) => <Line key={`t${k}`} line={l} />)}
+                {tail.map((l: ViewLine, k: number) => (
+                    <Line key={`t${k}`} line={l} />
+                ))}
             </div>,
         );
     }
     if (v.requirements.length > 0) {
-        sections.push(<div class="ic-section"><Line line={v.requirements} /></div>);
+        sections.push(
+            <div class="ic-section">
+                <Line line={v.requirements} />
+            </div>,
+        );
     }
     for (const mods of [v.enchants, v.implicits, v.explicits]) {
         if (mods.length > 0) {
@@ -102,7 +143,9 @@ export function ItemCard(props: { readonly view: ItemView; readonly image?: bool
                 {props.image !== false && v.icon !== null && (
                     <>
                         <hr class="ic-rule" />
-                        <div class="ic-image"><ItemImage view={v} size="large" /></div>
+                        <div class="ic-image">
+                            <ItemImage view={v} size="large" />
+                        </div>
                     </>
                 )}
             </div>
@@ -153,7 +196,14 @@ export function Info(props: InfoProps): JSX.Element {
         hideTip(key);
     };
     return (
-        <span tabIndex={0} class={`tipped${props.class === undefined ? '' : ` ${props.class}`}${anchorClass(key)}`} onMouseEnter={show} onMouseLeave={hide} onFocus={show} onBlur={hide}>
+        <span
+            tabIndex={0}
+            class={`tipped${props.class === undefined ? '' : ` ${props.class}`}${anchorClass(key)}`}
+            onMouseEnter={show}
+            onMouseLeave={hide}
+            onFocus={show}
+            onBlur={hide}
+        >
             {props.children}
         </span>
     );
@@ -168,10 +218,14 @@ export function ItemTip(): JSX.Element | null {
     const c = t.content;
     return (
         <div class="item-tip" role="tooltip">
-            {c.kind === 'item' ? <ItemCard view={c.view} /> : (
+            {c.kind === 'item' ? (
+                <ItemCard view={c.view} />
+            ) : (
                 <div class="info-card">
                     <p class="info-title">{c.title}</p>
-                    {c.lines.map((l: string, k: number) => <p key={k}>{l}</p>)}
+                    {c.lines.map((l: string, k: number) => (
+                        <p key={k}>{l}</p>
+                    ))}
                 </div>
             )}
         </div>

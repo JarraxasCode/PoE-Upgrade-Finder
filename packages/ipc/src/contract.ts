@@ -12,6 +12,7 @@
 
 import type { LimitPanel, RunEventUi, RunHeader, RunPhase, RunRequest, RunSnapshot, WeightPreview } from './run.ts';
 import type { ItemView } from './item-view.ts';
+import type { SlotEditorData, SlotPlan } from './plan.ts';
 
 export const INVOKE_CHANNEL: string = 'uf:invoke';
 export const EVENT_CHANNEL: string = 'uf:event';
@@ -19,7 +20,18 @@ export const EVENT_CHANNEL: string = 'uf:event';
 // Shared vocabulary ----------------------------------------------------------------------------------------
 
 export type GearSlot = 'Helmet' | 'Body Armour' | 'Gloves' | 'Boots' | 'Amulet' | 'Ring 1' | 'Ring 2' | 'Belt' | 'Weapon 1' | 'Weapon 2';
-export const GEAR_SLOTS: readonly GearSlot[] = ['Helmet', 'Body Armour', 'Gloves', 'Boots', 'Amulet', 'Ring 1', 'Ring 2', 'Belt', 'Weapon 1', 'Weapon 2'];
+export const GEAR_SLOTS: readonly GearSlot[] = [
+    'Helmet',
+    'Body Armour',
+    'Gloves',
+    'Boots',
+    'Amulet',
+    'Ring 1',
+    'Ring 2',
+    'Belt',
+    'Weapon 1',
+    'Weapon 2',
+];
 
 export type SearchDepth = 'thorough' | 'normal' | 'quick';
 export const SEARCH_DEPTHS: readonly SearchDepth[] = ['thorough', 'normal', 'quick'];
@@ -60,6 +72,12 @@ export interface AppSettings {
 }
 
 /** characters/<build>.json. */
+/** The level requirement filter (issue #22; a mirror of core's LevelFilter): up to the character's level, none, or up to a set level. */
+export type LevelFilter = { readonly kind: 'character' } | { readonly kind: 'off' } | { readonly kind: 'max'; readonly level: number };
+export const LEVEL_FILTER_KINDS: readonly LevelFilter['kind'][] = ['character', 'off', 'max'];
+/** Character levels run 1 to 100. */
+export const MAX_CHARACTER_LEVEL: number = 100;
+
 export interface BuildSettings {
     readonly floors: FloorSettings;
     /** DPS share of the gain, 0 to 1. */
@@ -74,6 +92,10 @@ export interface BuildSettings {
     readonly lastTarget: string | null;
     /** The weight review per slot: stat id → weight, 0 for off (PLAN.md, "Review PoB's weights before searching"). */
     readonly weightEdits: Readonly<Partial<Record<GearSlot, Readonly<Record<string, number>>>>>;
+    /** The slot plan per slot, as last edited or run (PLAN.md, "v2a"); a slot with none searches as v0.1 did. */
+    readonly slotPlans: Readonly<Partial<Record<GearSlot, SlotPlan>>>;
+    /** Which items the searches return by level requirement. */
+    readonly levelFilter: LevelFilter;
 }
 
 // Builds ---------------------------------------------------------------------------------------------------
@@ -111,6 +133,8 @@ export interface EquippedInfo {
     readonly name: string;
     readonly base: string;
     readonly rarity: string;
+    /** PoB's item type ("Boots", "One Handed Sword"): the slot plan editor's default type. Null when unknown. */
+    readonly itemType: string | null;
     /** The tooltip and image for the gear layout; null when PoB couldn't describe the item. */
     readonly view: ItemView | null;
 }
@@ -138,8 +162,17 @@ export interface BuildSummary {
 
 export type BuildState =
     | { readonly kind: 'none' }
-    /** equipped: the last known gear for this build (cache.sqlite), shown while PoB loads; null when none. */
-    | { readonly kind: 'loading'; readonly buildId: string; readonly equipped: readonly EquippedInfo[] | null }
+    /**
+     * equipped: the last known gear for this build (cache.sqlite), shown while PoB loads; null when none.
+     * summary: the figures from an earlier load of the same save text, target, PoB and app version; null when none.
+     * Shown until the live load replaces it; a search waits for the live one.
+     */
+    | {
+          readonly kind: 'loading';
+          readonly buildId: string;
+          readonly equipped: readonly EquippedInfo[] | null;
+          readonly summary: BuildSummary | null;
+      }
     | { readonly kind: 'ready'; readonly summary: BuildSummary }
     | { readonly kind: 'error'; readonly buildId: string; readonly message: string };
 
@@ -147,7 +180,15 @@ export type BuildState =
 
 /** From a trade call's rate-limit rules (Account present), never from the cookie (V15). */
 export type SignInStatus = 'unknown' | 'checking' | 'signed-in' | 'signed-out' | 'cloudflare' | 'window-open' | 'error';
-export const SIGN_IN_STATUSES: readonly SignInStatus[] = ['unknown', 'checking', 'signed-in', 'signed-out', 'cloudflare', 'window-open', 'error'];
+export const SIGN_IN_STATUSES: readonly SignInStatus[] = [
+    'unknown',
+    'checking',
+    'signed-in',
+    'signed-out',
+    'cloudflare',
+    'window-open',
+    'error',
+];
 
 export interface SignInState {
     readonly status: SignInStatus;
@@ -244,7 +285,10 @@ export interface Methods {
     /** Loads the build in PoB with the target ("saved" when null). Progress also comes as build-state events. */
     'build.select': { readonly params: { readonly buildId: string; readonly target: string | null }; readonly result: BuildSummary };
     'build.settings.get': { readonly params: { readonly buildId: string }; readonly result: BuildSettings };
-    'build.settings.save': { readonly params: { readonly buildId: string; readonly settings: BuildSettings }; readonly result: BuildSettings };
+    'build.settings.save': {
+        readonly params: { readonly buildId: string; readonly settings: BuildSettings };
+        readonly result: BuildSettings;
+    };
     /** The last known state, no network. */
     'signin.status': { readonly params: NoParams; readonly result: SignInState };
     /** Asks the site (one search through the shared limiter). */
@@ -261,7 +305,16 @@ export interface Methods {
     'rate.setManual': { readonly params: { readonly chaosPerDivine: number }; readonly result: RateState };
     'rate.useGgg': { readonly params: NoParams; readonly result: RateState };
     /** PoB's weighted stats for a build, slot and target, named and heaviest first (the generator, cached). */
-    'weights.preview': { readonly params: { readonly buildId: string; readonly slot: GearSlot; readonly target: string }; readonly result: WeightPreview };
+    'weights.preview': {
+        /** With a plan, the result also says which weights it prunes and why. */
+        readonly params: { readonly buildId: string; readonly slot: GearSlot; readonly target: string; readonly plan: SlotPlan | null };
+        readonly result: WeightPreview;
+    };
+    /** The plan editor's data for an item type and base (null: any base): the bases, and the mods that can roll there. No build needed. */
+    'slot.data': {
+        readonly params: { readonly slot: GearSlot; readonly itemType: string; readonly base: string | null };
+        readonly result: SlotEditorData;
+    };
     /** Starts a run (one at a time). Progress streams as run events. */
     'run.start': { readonly params: { readonly request: RunRequest }; readonly result: RunHeader };
     'run.pause': { readonly params: NoParams; readonly result: RunPhase };
@@ -273,11 +326,25 @@ export interface Methods {
     'run.current': { readonly params: NoParams; readonly result: RunSnapshot | null };
     'run.limits': { readonly params: NoParams; readonly result: LimitPanel };
     /** Recent lines of today's log, newest first, filtered. */
-    'logs.recent': { readonly params: { readonly minLevel: UiLogLevel; readonly area: string | null; readonly runId: string | null; readonly limit: number }; readonly result: LogsView };
+    'logs.recent': {
+        readonly params: {
+            readonly minLevel: UiLogLevel;
+            readonly area: string | null;
+            readonly runId: string | null;
+            readonly limit: number;
+        };
+        readonly result: LogsView;
+    };
     /** Asks where to save, then writes a zip of today's log and the run's log (redacted). */
-    'logs.export': { readonly params: { readonly runId: string | null }; readonly result: { readonly saved: boolean; readonly file: string | null } };
+    'logs.export': {
+        readonly params: { readonly runId: string | null };
+        readonly result: { readonly saved: boolean; readonly file: string | null };
+    };
     /** Opens an item's buy link in the user's browser (after taking a search and a fetch slot from the shared limiter). */
-    'link.open': { readonly params: { readonly runId: string; readonly itemId: string }; readonly result: { readonly opened: boolean; readonly message: string | null } };
+    'link.open': {
+        readonly params: { readonly runId: string; readonly itemId: string };
+        readonly result: { readonly opened: boolean; readonly message: string | null };
+    };
     'pob.status': { readonly params: NoParams; readonly result: PobUpdateState };
     /** Reads the latest release's version from PoB Community's GitHub. */
     'pob.check': { readonly params: NoParams; readonly result: PobUpdateState };

@@ -10,27 +10,71 @@
 import { mkdirSync } from 'node:fs';
 import { basename, join } from 'node:path';
 import { shell } from 'electron';
-import { buyLink, deepenSlotSearch, generatorWeights, isTradeSiteUrl, priceBands, runSlotSearch, splitDepth, v1SpecBuilder } from '@poe-upgrade-finder/core';
-import type { EvaluatedItem, ModCatalog, PobStats, PriceBand, RunEvent, RunResult, RunTrade, SearchRecord, SlotSearchSpec, WeightedStat } from '@poe-upgrade-finder/core';
+import {
+    bandSearches,
+    buyLink,
+    compileQuery,
+    deepenSlotSearch,
+    generatorWeights,
+    isEmptyPlan,
+    isTradeSiteUrl,
+    priceBands,
+    splitDepth,
+} from '@poe-upgrade-finder/core';
+import type {
+    EvaluatedItem,
+    ModCatalog,
+    PobStats,
+    PriceBand,
+    RunEvent,
+    RunResult,
+    RunTrade,
+    SlotPlan,
+    SlotRunInput,
+    SearchRecord,
+    SlotSearchSpec,
+    WeightedStat,
+} from '@poe-upgrade-finder/core';
 import { DEPTH_PER_BAND, pobWeightList } from '@poe-upgrade-finder/core';
-import type { EngineClient, StripData, TargetRequest, TradeQueryData, WithWarnings } from '@poe-upgrade-finder/engine-client';
+import type { EngineClient, SlotData, TargetRequest, TradeQueryData, WithWarnings } from '@poe-upgrade-finder/engine-client';
 import { budgetLabel, parseBudgetText } from '@poe-upgrade-finder/ipc';
 import type {
-    Budget, BuildSettings, EquippedInfo, FeedEntry, GearSlot, SearchedStat, WeightPreview, FeedLevel, LimitPanel, MainEvent, RunHeader, RunPhase, RunRequest, RunSnapshot, RunSummaryUi, UiItem, UiSearch,
+    Budget,
+    BuildSettings,
+    EquippedInfo,
+    FeedEntry,
+    GearSlot,
+    SearchedStat,
+    WeightPreview,
+    FeedLevel,
+    LimitPanel,
+    MainEvent,
+    RunHeader,
+    RunPhase,
+    RunRequest,
+    RunSnapshot,
+    RunSummaryUi,
+    UiItem,
+    UiSearch,
 } from '@poe-upgrade-finder/ipc';
 import type { JsonlLogger, Logger } from '@poe-upgrade-finder/logging';
 import type { FetchResponse, LimiterEvent, SearchResponse, TradePolicy, TradeSearchBody } from '@poe-upgrade-finder/trade';
 import { targetRequest } from '../services/build-summary.ts';
 import { generatorKey } from '../services/cache-db.ts';
 import type { CacheDb } from '../services/cache-db.ts';
+import { readSave } from '../services/engine-session.ts';
 import type { EngineSession, LoadedBuild } from '../services/engine-session.ts';
 import type { SettingsStore } from '../services/settings-store.ts';
+import type { SlotDataService } from '../services/slot-data.ts';
 import type { TradeServices } from '../services/trade-services.ts';
 import { UserFacingError } from '../ui/ipc-server.ts';
 import { PauseGate } from './pause-gate.ts';
 import { engineAdapter, pruneRuns, writeRunRecord } from './shared.ts';
-import { limitPanel, toUiBand, toUiItem, toUiSearch, toUiSummary } from './ui-mapping.ts';
+import { NO_REVIEW, planReview, runSlotPlan } from './slot-pipeline.ts';
+import type { PlanReview, PreparedSlot, SlotPlanJob } from './slot-pipeline.ts';
+import { levelFilterLabel, limitPanel, toUiBand, toUiItem, toUiRunPlan, toUiSearch, toUiSummary } from './ui-mapping.ts';
 import type { LimiterWait } from './ui-mapping.ts';
+import { messageOf, stackOf, toError } from '@poe-upgrade-finder/validate';
 
 export interface RunControllerOptions {
     readonly userData: string;
@@ -44,12 +88,14 @@ export interface RunControllerOptions {
     readonly emit: (event: MainEvent) => void;
     /** PoB's trade query per build, slot, target and blend (V23). */
     readonly cache: CacheDb;
+    /** PoB's mods per item type, for slot plans. */
+    readonly slotData: SlotDataService;
     /** Development (--replay): recorded listings instead of the trade site; no sign-in, a fixed divine rate. */
     readonly replay?: { readonly trade: RunTrade; readonly chaosPerDivine: number };
 }
 
-/** What a finished run keeps so "Search deeper" can extend it. */
-interface RunContext {
+/** Everything a run is searched with, fixed once it starts. */
+interface RunSetup {
     readonly spec: SlotSearchSpec;
     readonly bands: readonly PriceBand[];
     readonly target: TargetRequest;
@@ -58,6 +104,64 @@ interface RunContext {
     readonly chaosPerDivine: number | undefined;
     readonly settings: BuildSettings;
     readonly request: RunRequest;
+    /** The slot plan searched (the request's one plan in v0.2). */
+    readonly plan: SlotPlan;
+}
+
+/** What the header needs beyond the setup. */
+interface HeaderMeta {
+    readonly runId: string;
+    readonly file: string;
+    readonly league: string;
+    readonly budget: Budget;
+    readonly minBudget: Budget | undefined;
+    readonly budgetChaos: number;
+    readonly startedMs: number;
+    readonly catalog: ModCatalog | undefined;
+    /** What the plan's check changed (a redundant exclude left out). */
+    readonly planNotes: readonly string[];
+}
+
+/**
+ * The first band's first search as compiled, for the log: what the plan sends, beside PoB's weights. Each
+ * search's own body (and the site's complexity) is in its trade log line; the bands differ only in price.
+ */
+function firstQuery(spec: SlotSearchSpec, chaosPerDivine: number | undefined): unknown {
+    const band: PriceBand | undefined = spec.priceBands[0];
+    const search = band === undefined ? undefined : bandSearches(band, chaosPerDivine)[0];
+    if (search === undefined) {
+        return null;
+    }
+    try {
+        const q = compileQuery(spec, search);
+        return { bandId: q.bandId, option: q.option, complexity: q.complexity, weightsUsed: q.weightsUsed, body: q.body };
+    } catch (error: unknown) {
+        return { error: messageOf(error) };
+    }
+}
+
+/** The plan, its check, its pruning and the compiled query, for the run's log (only when there is a plan). */
+function logPlan(log: Logger, plan: SlotPlan, prepared: PreparedSlot, chaosPerDivine: number | undefined): void {
+    if (isEmptyPlan(plan)) {
+        return;
+    }
+    const spec: SlotSearchSpec = prepared.spec;
+    log.log('info', 'slot plan', {
+        plan: plan,
+        notes: prepared.check.notes.map((n) => n.text),
+        baseType: spec.baseType,
+        requirements: spec.requirements.filter((r) => r.origin === 'plan'),
+        exclusions: spec.exclusions,
+        defences: spec.defences,
+        influences: spec.influences,
+        pruned: spec.pruned,
+        maxLevelRequirement: spec.maxLevelRequirement ?? null,
+        query: firstQuery(spec, chaosPerDivine),
+    });
+}
+
+/** What a finished run keeps so "Search deeper" can extend it. */
+interface RunContext extends RunSetup {
     readonly result: RunResult;
     readonly finishedMs: number;
 }
@@ -88,8 +192,24 @@ function stamp(ms: number): string {
     return new Date(ms).toISOString().replace(/[:.]/g, '-');
 }
 
-function messageOf(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+/** A budget in chaos; one in divines needs the rate, else `noRate` is the error. */
+function chaosOf(budget: Budget, chaosPerDivine: number | undefined, noRate: string): number {
+    if (budget.unit === 'chaos') {
+        return budget.amount;
+    }
+    if (chaosPerDivine === undefined) {
+        throw new UserFacingError(noRate);
+    }
+    return budget.amount * chaosPerDivine;
+}
+
+function errorDetails(error: unknown): { readonly error: string; readonly stack: string | null } {
+    return { error: messageOf(error), stack: stackOf(error) };
+}
+
+/** A band's label for the feed, from its id. */
+function bandLabeller(bands: readonly PriceBand[]): (bandId: string) => string {
+    return (bandId: string): string => bands.find((b: PriceBand) => b.id === bandId)?.label ?? bandId;
 }
 
 export class RunController {
@@ -147,16 +267,62 @@ export class RunController {
         if (r === undefined) {
             return null;
         }
-        return { header: r.header, phase: r.phase, searches: r.searches, items: r.items, bandsDone: r.bandsDone, feed: r.feed, summary: r.summary };
+        return {
+            header: r.header,
+            phase: r.phase,
+            searches: r.searches,
+            items: r.items,
+            bandsDone: r.bandsDone,
+            feed: r.feed,
+            summary: r.summary,
+        };
     }
 
     public limits(): LimitPanel {
         return limitPanel(this.options.trade.limiter.snapshot(), this.wait, Date.now());
     }
 
+    /** The save's full path, or a user-facing error when it has left the Builds folder. */
+    private requireBuildFile(buildId: string): string {
+        const file: string | undefined = this.options.buildFile(buildId);
+        if (file === undefined) {
+            throw new UserFacingError(`That build isn't in the Builds folder any more: ${buildId}`);
+        }
+        return file;
+    }
+
+    /** Live runs need the pathofexile.com sign-in; replay runs don't. */
+    private async requireSignedIn(): Promise<void> {
+        if (this.options.replay !== undefined) {
+            return;
+        }
+        const { trade } = this.options;
+        const signIn = trade.signInState.status === 'signed-in' ? trade.signInState : await trade.check();
+        if (signIn.status !== 'signed-in') {
+            throw new UserFacingError(
+                signIn.status === 'error'
+                    ? `Couldn't check the sign-in: ${signIn.message ?? ''}`
+                    : 'Not signed in to pathofexile.com: sign in first.',
+            );
+        }
+    }
+
     /** PoB's trade query for the loaded build: from the generator cache (V23), else generated and cached. */
-    private async pobQueryFor(client: EngineClient, loaded: LoadedBuild, slot: GearSlot, target: TargetRequest, blend: number, log: Logger): Promise<{ readonly query: TradeQueryData; readonly cached: boolean }> {
-        const key: string = generatorKey({ xmlHash: loaded.xmlHash, slot: slot, target: target, blend: blend, pobVersion: loaded.load.pobVersion });
+    private async pobQueryFor(
+        client: EngineClient,
+        loaded: LoadedBuild,
+        slot: GearSlot,
+        target: TargetRequest,
+        blend: number,
+        log: Logger,
+    ): Promise<{ readonly query: TradeQueryData; readonly cached: boolean }> {
+        const key: string = generatorKey({
+            xmlHash: loaded.xmlHash,
+            slot: slot,
+            target: target,
+            blend: blend,
+            pobVersion: loaded.load.pobVersion,
+        });
         const cached: TradeQueryData | undefined = this.options.cache.generator(key);
         if (cached !== undefined) {
             log.log('info', 'trade query from the cache', { key: key });
@@ -170,25 +336,92 @@ export class RunController {
         return { query: fresh, cached: false };
     }
 
-    /** The weight review list for the Search view: PoB's weights for the build, slot and target, named. */
-    public async previewWeights(buildId: string, slot: GearSlot, targetId: string): Promise<WeightPreview> {
-        const file: string | undefined = this.options.buildFile(buildId);
-        if (file === undefined) {
-            throw new UserFacingError(`That build isn't in the Builds folder any more: ${buildId}`);
+    /**
+     * PoB's query from the generator cache for the save as it is on disk now, without waiting for PoB to load it:
+     * the same key the loaded path uses (save text, slot, target, blend, PoB version), so the answer is the same.
+     */
+    private queryFromCacheBeforeLoad(
+        file: string,
+        slot: GearSlot,
+        target: TargetRequest,
+        blend: number,
+        log: Logger,
+    ): { readonly query: TradeQueryData; readonly cached: boolean } | undefined {
+        const pobVersion: string | null = this.options.session.expectedPobVersion();
+        if (pobVersion === null) {
+            return undefined;
         }
+        let xmlHash: string;
+        try {
+            xmlHash = readSave(file).xmlHash;
+        } catch {
+            return undefined;
+        }
+        const key: string = generatorKey({ xmlHash: xmlHash, slot: slot, target: target, blend: blend, pobVersion: pobVersion });
+        const cached: TradeQueryData | undefined = this.options.cache.generator(key);
+        if (cached === undefined) {
+            return undefined;
+        }
+        log.log('info', 'trade query from the cache', { key: key, beforeLoad: true });
+        return { query: cached, cached: true };
+    }
+
+    private async queryAfterLoad(
+        buildId: string,
+        file: string,
+        targetId: string,
+        slot: GearSlot,
+        target: TargetRequest,
+        blend: number,
+        log: Logger,
+    ): Promise<{ readonly query: TradeQueryData; readonly cached: boolean }> {
+        const loaded: LoadedBuild = await this.options.session.ensure(buildId, file, targetId);
+        return this.options.session.exclusive((client: EngineClient) => {
+            // Another build can load between ensure() and the lock: the query would be cached under this
+            // build's key but generated on the other one.
+            if (this.options.session.loaded !== loaded) {
+                throw new UserFacingError('The build changed while the weights were loading: pick it again.');
+            }
+            return this.pobQueryFor(client, loaded, slot, target, blend, log);
+        });
+    }
+
+    /** The slot data a non-empty plan needs (before the worker lock: getting it may take the lock itself). */
+    private async slotDataFor(plan: SlotPlan): Promise<SlotData | undefined> {
+        if (isEmptyPlan(plan) || plan.itemType === null) {
+            return undefined;
+        }
+        try {
+            return await this.options.slotData.get(plan.itemType);
+        } catch (error: unknown) {
+            throw new UserFacingError(`Couldn't read PoB's mods for ${plan.itemType}: ${messageOf(error)}`);
+        }
+    }
+
+    /**
+     * The weight review list for the Search view: PoB's weights for the build, slot and target, named. With a
+     * slot plan, also which of them the plan takes out and why, and whether the plan can be searched.
+     */
+    public async previewWeights(buildId: string, slot: GearSlot, targetId: string, plan: SlotPlan | null): Promise<WeightPreview> {
+        const file: string = this.requireBuildFile(buildId);
         const settings: BuildSettings = this.options.store.buildSettings(buildId);
         const catalog: ModCatalog | undefined = await this.options.trade.catalog(this.options.replay !== undefined);
-        const loaded: LoadedBuild = await this.options.session.ensure(buildId, file, targetId);
+        const slotData: SlotData | undefined = plan === null ? undefined : await this.slotDataFor(plan);
         const target: TargetRequest = targetRequest(targetId);
         const log: Logger = this.options.logger.area('run');
-        const result = await this.options.session.exclusive((client: EngineClient) => this.pobQueryFor(client, loaded, slot, target, settings.blend, log));
+        const result: { readonly query: TradeQueryData; readonly cached: boolean } =
+            this.queryFromCacheBeforeLoad(file, slot, target, settings.blend, log) ??
+            (await this.queryAfterLoad(buildId, file, targetId, slot, target, settings.blend, log));
         if (result.query.queryError !== undefined) {
             throw new UserFacingError(`PoB couldn't build the search for ${slot}: ${result.query.queryError}`);
         }
-        const weights: SearchedStat[] = pobWeightList(result.query)
+        const label = (statId: string): string => catalog?.describe(statId) ?? statId;
+        const pobList: readonly WeightedStat[] = pobWeightList(result.query);
+        const weights: SearchedStat[] = [...pobList]
             .sort((a: WeightedStat, b: WeightedStat) => b.weight - a.weight)
-            .map((w: WeightedStat) => ({ statId: w.statId, label: catalog?.describe(w.statId) ?? w.statId, weight: w.weight }));
-        return { buildId: buildId, slot: slot, target: targetId, weights: weights, cached: result.cached };
+            .map((w: WeightedStat) => ({ statId: w.statId, label: label(w.statId), weight: w.weight }));
+        const review: PlanReview = plan === null ? NO_REVIEW : planReview(plan, slotData, pobList, label);
+        return { buildId: buildId, slot: slot, target: targetId, weights: weights, ...review, cached: result.cached };
     }
 
     /** Prepares the run (sign-in, rate, PoB) and starts it; resolves with its header once searching begins. */
@@ -205,35 +438,43 @@ export class RunController {
         if (budget === undefined) {
             throw new UserFacingError('Type a budget: chaos (300c) or divines (1.5d).');
         }
-        const file: string | undefined = this.options.buildFile(request.buildId);
-        if (file === undefined) {
-            throw new UserFacingError(`That build isn't in the Builds folder any more: ${request.buildId}`);
-        }
+        const file: string = this.requireBuildFile(request.buildId);
         const replay = this.options.replay;
-        if (replay === undefined) {
-            const signIn = trade.signInState.status === 'signed-in' ? trade.signInState : await trade.check();
-            if (signIn.status !== 'signed-in') {
-                throw new UserFacingError(signIn.status === 'error' ? `Couldn't check the sign-in: ${signIn.message ?? ''}` : 'Not signed in to pathofexile.com: sign in first.');
-            }
-        }
+        await this.requireSignedIn();
         this.checkPrepCancelled(prep);
         const chaosPerDivine: number | undefined = replay?.chaosPerDivine ?? (await trade.chaosPerDivine());
         this.checkPrepCancelled(prep);
-        if (budget.unit === 'divine' && chaosPerDivine === undefined) {
-            throw new UserFacingError('A budget in divines needs a divine rate: type one in, or give the budget in chaos.');
-        }
-        const budgetChaos: number = budget.unit === 'chaos' ? budget.amount : budget.amount * (chaosPerDivine ?? 0);
+        const budgetChaos: number = chaosOf(
+            budget,
+            chaosPerDivine,
+            'A budget in divines needs a divine rate: type one in, or give the budget in chaos.',
+        );
         const minBudget: Budget | undefined = request.minBudget === '' ? undefined : parseBudgetText(request.minBudget);
-        if (minBudget !== undefined && minBudget.unit === 'divine' && chaosPerDivine === undefined) {
-            throw new UserFacingError('A min price in divines needs a divine rate: type one in, or give it in chaos.');
-        }
-        const minChaos: number | undefined = minBudget === undefined ? undefined : minBudget.unit === 'chaos' ? minBudget.amount : minBudget.amount * (chaosPerDivine ?? 0);
+        const minChaos: number | undefined =
+            minBudget === undefined
+                ? undefined
+                : chaosOf(minBudget, chaosPerDivine, 'A min price in divines needs a divine rate: type one in, or give it in chaos.');
         if (minChaos !== undefined && minChaos >= budgetChaos) {
             throw new UserFacingError('The min price must be under the max price.');
         }
+        // v0.2: exactly one plan (checked at the IPC boundary); v0.4 loops runSlotPlan over them.
+        const plan: SlotPlan | undefined = request.slots[0];
+        if (plan === undefined || request.slots.length !== 1) {
+            throw new UserFacingError('One slot per search for now.');
+        }
+        const slot: GearSlot = plan.slot;
         const settings: BuildSettings = store.buildSettings(request.buildId);
-        store.saveBuildSettings(request.buildId, { ...settings, lastSlot: request.slot, lastBudget: request.budget, lastMinBudget: request.minBudget === '' ? null : request.minBudget, lastTarget: request.target });
+        store.saveBuildSettings(request.buildId, {
+            ...settings,
+            lastSlot: slot,
+            lastBudget: request.budget,
+            lastMinBudget: request.minBudget === '' ? null : request.minBudget,
+            lastTarget: request.target,
+            slotPlans: { ...settings.slotPlans, [slot]: plan },
+        });
         const league: string = store.settings.league;
+        const slotData: SlotData | undefined = await this.slotDataFor(plan);
+        this.checkPrepCancelled(prep);
 
         // Names for PoB's weighted stats (the trade site's stat list, cached a week; never fetched in replay mode).
         const catalog: ModCatalog | undefined = await trade.catalog(replay !== undefined);
@@ -243,106 +484,118 @@ export class RunController {
         if (!(loaded.stats.damage > 0)) {
             throw new UserFacingError('The damage target reads 0. Pick the skill to measure under "Measure damage on".');
         }
-        const started: number = Date.now();
-        const runId: string = `${request.slot.replace(/ /g, '')}-${stamp(started)}`;
+        const startedMs: number = Date.now();
+        const runId: string = `${slot.replace(/ /g, '')}-${stamp(startedMs)}`;
         const target: TargetRequest = targetRequest(request.target);
+        const bands: PriceBand[] = priceBands(budgetChaos, minChaos === undefined ? {} : { minChaos: minChaos });
 
-        return new Promise<RunHeader>((resolveHeader: (h: RunHeader) => void, rejectHeader: (e: Error) => void) => {
-            let headerSent: boolean = false;
-            void session.exclusive(async (client: EngineClient) => {
-                const { logger } = this.options;
-                logger.startRun(runId);
-                const runLog: Logger = logger.area('run');
-                try {
-                    this.checkStillLoaded(loaded, prep);
-                    const stripped: WithWarnings<StripData> = await client.strip(request.slot, { target: target });
-                    this.checkPrepCancelled(prep);
-                    const query: TradeQueryData = (await this.pobQueryFor(client, loaded, request.slot, target, settings.blend, runLog)).query;
-                    this.checkPrepCancelled(prep);
-                    const bands: PriceBand[] = priceBands(budgetChaos, minChaos === undefined ? {} : { minChaos: minChaos });
-                    const spec: SlotSearchSpec = v1SpecBuilder().build({
-                        slot: request.slot,
-                        listingType: request.listing,
-                        priceBands: bands,
-                        characterLevel: loaded.load.info.level,
-                        baseline: loaded.stats,
-                        stripped: stripped.stats,
-                        pobQuery: query,
-                        floors: settings.floors,
-                        weightEdits: settings.weightEdits[request.slot],
-                    });
-                    const header: RunHeader = {
-                        runId: runId,
-                        buildId: request.buildId,
-                        buildName: basename(file).replace(/\.xml$/i, ''),
-                        slot: request.slot,
-                        league: league,
-                        budgetLabel: minBudget === undefined ? budgetLabel(budget) : `${budgetLabel(minBudget)} to ${budgetLabel(budget)}`,
-                        budgetChaos: budgetChaos,
-                        targetLabel: loaded.summary.targetLabel,
-                        depth: request.depth,
-                        perBand: DEPTH_PER_BAND[request.depth],
-                        listing: request.listing,
-                        minGainPct: settings.minGainPct,
-                        blend: settings.blend,
-                        chaosPerDivine: chaosPerDivine ?? null,
-                        startedAtMs: started,
-                        baselineDamage: loaded.stats.damage,
-                        baselineEhp: loaded.summary.ehp,
-                        currentItem: query.item.name || query.item.base || 'nothing',
-                        currentView: loaded.summary.equipped.find((e: EquippedInfo) => e.slot === request.slot)?.view ?? null,
-                        weightedStats: spec.weights.length,
-                        hardNeeds: spec.requirements.map((r) => r.label.replace(/^Required: /, '').replace(/, from strip$/, '')),
-                        searchedFor: [...spec.weights]
-                            .sort((a: WeightedStat, b: WeightedStat) => b.weight - a.weight)
-                            .map((w: WeightedStat) => ({ statId: w.statId, label: catalog?.describe(w.statId) ?? w.statId, weight: w.weight })),
-                        bands: bands.map(toUiBand),
-                    };
-                    const state: RunState = {
-                        header: header,
-                        phase: 'searching',
-                        searches: [],
-                        items: [],
-                        evaluated: new Map<string, EvaluatedItem>(),
-                        bandsDone: [],
-                        feed: [],
-                        summary: null,
-                        abort: prep,
-                        gate: new PauseGate(),
-                        context: undefined,
-                        baseline: loaded.stats,
-                    };
-                    this.run = state;
-                    runLog.log('info', 'run starting', { runId: runId, request: request, league: league, budgetChaos: budgetChaos, minChaos: minChaos ?? null, chaosPerDivine: chaosPerDivine ?? null, floors: settings.floors, blend: settings.blend });
-                    this.options.emit({ kind: 'run-started', header: header });
-                    this.startLimitPushes();
-                    headerSent = true;
-                    resolveHeader(header);
-                    await this.execute(state, spec, bands, client, target, loaded, query, chaosPerDivine, settings, runLog, request);
-                } catch (error: unknown) {
-                    const details = { error: messageOf(error), stack: error instanceof Error ? error.stack ?? null : null };
-                    if (!headerSent && prep.signal.aborted) {
-                        runLog.log('info', 'run cancelled while getting ready', { runId: runId });
-                    } else if (!headerSent || this.run === undefined) {
-                        runLog.log('error', 'run failed', details);
-                    }
-                    if (!headerSent) {
-                        rejectHeader(error instanceof Error ? error : new Error(String(error)));
-                    } else if (this.run !== undefined) {
-                        this.feed(this.run, 'error', `The run failed: ${messageOf(error)}`, details);
-                        this.setPhase(this.run, 'failed');
-                    }
-                } finally {
-                    this.stopLimitPushes();
-                    logger.endRun();
+        return this.underWorkerLock(
+            runId,
+            async (client: EngineClient, runLog: Logger, started: (header: RunHeader) => void): Promise<void> => {
+                this.checkStillLoaded(loaded, prep);
+                // Searches only start after onPrepared, so the gate can exist before the run's state does.
+                const gate: PauseGate = new PauseGate();
+                const job: SlotPlanJob = {
+                    plan: plan,
+                    slotData: slotData,
+                    loaded: loaded,
+                    target: target,
+                    listing: request.listing,
+                    bands: bands,
+                    floors: settings.floors,
+                    weightEdits: settings.weightEdits[slot],
+                    levelFilter: settings.levelFilter,
+                    pobQuery: async (c: EngineClient, s: GearSlot) =>
+                        (await this.pobQueryFor(c, loaded, s, target, settings.blend, runLog)).query,
+                    checkpoint: () => {
+                        this.checkPrepCancelled(prep);
+                    },
+                };
+                const holder: { state?: RunState; setup?: RunSetup } = {};
+                const { result } = await runSlotPlan(client, job, {
+                    trade: this.gatedTrade(gate),
+                    onPrepared: (prepared: PreparedSlot): SlotRunInput => {
+                        const setup: RunSetup = {
+                            spec: prepared.spec,
+                            bands: bands,
+                            target: target,
+                            loaded: loaded,
+                            query: prepared.query,
+                            chaosPerDivine: chaosPerDivine,
+                            settings: settings,
+                            request: request,
+                            plan: plan,
+                        };
+                        const header: RunHeader = this.headerFor(
+                            {
+                                runId,
+                                file,
+                                league,
+                                budget,
+                                minBudget,
+                                budgetChaos,
+                                startedMs,
+                                catalog,
+                                planNotes: prepared.check.notes.map((n) => n.text),
+                            },
+                            setup,
+                        );
+                        const state: RunState = {
+                            header: header,
+                            phase: 'searching',
+                            searches: [],
+                            items: [],
+                            evaluated: new Map<string, EvaluatedItem>(),
+                            bandsDone: [],
+                            feed: [],
+                            summary: null,
+                            abort: prep,
+                            gate: gate,
+                            context: undefined,
+                            baseline: loaded.stats,
+                        };
+                        holder.state = state;
+                        holder.setup = setup;
+                        this.run = state;
+                        runLog.log('info', 'run starting', {
+                            runId: runId,
+                            request: request,
+                            league: league,
+                            budgetChaos: budgetChaos,
+                            minChaos: minChaos ?? null,
+                            chaosPerDivine: chaosPerDivine ?? null,
+                            floors: settings.floors,
+                            blend: settings.blend,
+                        });
+                        logPlan(runLog, plan, prepared, chaosPerDivine);
+                        this.options.emit({ kind: 'run-started', header: header });
+                        started(header);
+                        this.feedStart(state, prepared);
+                        return this.searchOptions(state, setup);
+                    },
+                    onEvent: (event: RunEvent) => {
+                        if (holder.state !== undefined) {
+                            this.onRunEvent(holder.state, event, bandLabeller(bands), runLog);
+                        }
+                    },
+                });
+                const { state, setup } = holder;
+                if (state !== undefined && setup !== undefined) {
+                    this.complete(state, { ...setup, result: result, finishedMs: 0 }, result, runLog, state.header.startedAtMs);
                 }
-            }).catch((error: unknown) => {
-                // The task never ran (no engine client could be made): the caller must still get an answer.
-                if (!headerSent) {
-                    rejectHeader(error instanceof Error ? error : new Error(String(error)));
+            },
+            (error: unknown, headerSent: boolean, runLog: Logger): void => {
+                if (!headerSent && prep.signal.aborted) {
+                    runLog.log('info', 'run cancelled while getting ready', { runId: runId });
+                } else if (!headerSent || this.run === undefined) {
+                    runLog.log('error', 'run failed', errorDetails(error));
                 }
-            });
-        });
+                if (headerSent && this.run !== undefined) {
+                    this.feed(this.run, 'error', `The run failed: ${messageOf(error)}`, errorDetails(error));
+                    this.setPhase(this.run, 'failed');
+                }
+            },
+        );
     }
 
     public pause(): RunPhase {
@@ -407,79 +660,63 @@ export class RunController {
         if (r.header.depth === 'thorough') {
             throw new UserFacingError('This run was already Thorough.');
         }
-        if (this.options.replay === undefined) {
-            const signIn = this.options.trade.signInState.status === 'signed-in' ? this.options.trade.signInState : await this.options.trade.check();
-            if (signIn.status !== 'signed-in') {
-                throw new UserFacingError('Not signed in to pathofexile.com: sign in first.');
-            }
-        }
-        const file: string | undefined = this.options.buildFile(ctx.request.buildId);
-        if (file === undefined) {
-            throw new UserFacingError(`That build isn't in the Builds folder any more: ${ctx.request.buildId}`);
-        }
+        await this.requireSignedIn();
+        const file: string = this.requireBuildFile(ctx.request.buildId);
         this.checkPrepCancelled(prep);
         const loaded: LoadedBuild = await this.options.session.ensure(ctx.request.buildId, file, ctx.request.target);
         this.checkPrepCancelled(prep);
         if (loaded.xmlHash !== ctx.loaded.xmlHash) {
-            throw new UserFacingError('The build changed in PoB since this run: start a new search, so every item is scored against the same build.');
+            throw new UserFacingError(
+                'The build changed in PoB since this run: start a new search, so every item is scored against the same build.',
+            );
         }
         const header: RunHeader = { ...r.header, depth: 'thorough', perBand: DEPTH_PER_BAND.thorough };
         const searches: UiSearch[] = deeperPlan(ctx.result.searches, ctx.bands, header.perBand);
-        return new Promise<RunHeader>((resolveHeader: (h: RunHeader) => void, rejectHeader: (e: Error) => void) => {
-            let headerSent: boolean = false;
-            void this.options.session.exclusive(async (client: EngineClient) => {
-                const { logger } = this.options;
-                logger.startRun(runId);
-                const runLog: Logger = logger.area('run');
-                try {
-                    this.checkStillLoaded(loaded, prep);
-                    r.header = header;
-                    r.searches = searches;
-                    r.bandsDone.length = 0;
-                    r.summary = null;
-                    r.phase = 'searching';
-                    this.options.emit({ kind: 'run-deepen', runId: runId, header: header, searches: searches });
-                    this.startLimitPushes();
-                    headerSent = true;
-                    resolveHeader(header);
-                    const extra: number = searches.reduce((a: number, x: UiSearch) => a + x.fetchPlanned, 0) - ctx.result.counts.fetched - ctx.result.counts.missing;
-                    this.feed(r, 'info', `Searching deeper: Thorough (${header.perBand} per band) over the same searches, about ${Math.max(0, extra)} more listings, no new searches.`);
-                    if (Date.now() - ctx.finishedMs > IDS_TESTED_MS) {
-                        this.feed(r, 'warn', 'This run is over 15 minutes old: some listings may be gone from the site.');
-                    }
-                    runLog.log('info', 'search deeper', { runId: runId, perBand: header.perBand });
-                    const labelOf = (bandId: string): string => ctx.bands.find((b: PriceBand) => b.id === bandId)?.label ?? bandId;
-                    const started: number = Date.now();
-                    const result: RunResult = await deepenSlotSearch(
-                        { league: header.league, spec: ctx.spec, baseline: ctx.loaded.stats, blend: ctx.settings.blend, depth: header.perBand, chaosPerDivine: ctx.chaosPerDivine, value: { minGainPct: ctx.settings.minGainPct }, signal: r.abort.signal },
-                        ctx.result,
-                        this.gatedTrade(r),
-                        engineAdapter(client, ctx.request.slot, ctx.target),
-                        (event: RunEvent) => {
-                            this.onRunEvent(r, event, labelOf, runLog);
-                        },
-                    );
-                    this.complete(r, { ...ctx, request: { ...ctx.request, depth: 'thorough' } }, result, runLog, started);
-                } catch (error: unknown) {
-                    const details = { error: messageOf(error), stack: error instanceof Error ? error.stack ?? null : null };
-                    if (!headerSent) {
-                        runLog.log('error', 'search deeper failed', details);
-                        // Nothing changed yet: the finished run stays as it was.
-                        rejectHeader(error instanceof Error ? error : new Error(String(error)));
-                    } else {
-                        this.feed(r, 'error', `Search deeper failed: ${messageOf(error)}`, details);
-                        this.setPhase(r, 'failed');
-                    }
-                } finally {
-                    this.stopLimitPushes();
-                    logger.endRun();
+
+        return this.underWorkerLock(
+            runId,
+            async (client: EngineClient, runLog: Logger, started: (header: RunHeader) => void): Promise<void> => {
+                this.checkStillLoaded(loaded, prep);
+                r.header = header;
+                r.searches = searches;
+                r.bandsDone.length = 0;
+                r.summary = null;
+                r.phase = 'searching';
+                this.options.emit({ kind: 'run-deepen', runId: runId, header: header, searches: searches });
+                started(header);
+                const planned: number = searches.reduce((a: number, x: UiSearch) => a + x.fetchPlanned, 0);
+                const extra: number = planned - ctx.result.counts.fetched - ctx.result.counts.missing;
+                this.feed(
+                    r,
+                    'info',
+                    `Searching deeper: Thorough (${header.perBand} per band) over the same searches, about ${Math.max(0, extra)} more listings, no new searches.`,
+                );
+                if (Date.now() - ctx.finishedMs > IDS_TESTED_MS) {
+                    this.feed(r, 'warn', 'This run is over 15 minutes old: some listings may be gone from the site.');
                 }
-            }).catch((error: unknown) => {
+                runLog.log('info', 'search deeper', { runId: runId, perBand: header.perBand });
+                const passStartedMs: number = Date.now();
+                const result: RunResult = await deepenSlotSearch(
+                    this.searchOptions(r, ctx),
+                    ctx.result,
+                    this.gatedTrade(r.gate),
+                    engineAdapter(client, ctx.spec.slot, ctx.target),
+                    (event: RunEvent) => {
+                        this.onRunEvent(r, event, bandLabeller(ctx.bands), runLog);
+                    },
+                );
+                this.complete(r, { ...ctx, request: { ...ctx.request, depth: 'thorough' } }, result, runLog, passStartedMs);
+            },
+            (error: unknown, headerSent: boolean, runLog: Logger): void => {
                 if (!headerSent) {
-                    rejectHeader(error instanceof Error ? error : new Error(String(error)));
+                    // Nothing changed yet: the finished run stays as it was.
+                    runLog.log('error', 'search deeper failed', errorDetails(error));
+                } else {
+                    this.feed(r, 'error', `Search deeper failed: ${messageOf(error)}`, errorDetails(error));
+                    this.setPhase(r, 'failed');
                 }
-            });
-        });
+            },
+        );
     }
 
     /** Opens a listing's buy link in the user's browser. */
@@ -505,38 +742,141 @@ export class RunController {
         return { opened: true, message: null };
     }
 
-    private async execute(
-        state: RunState, spec: SlotSearchSpec, bands: readonly PriceBand[], client: EngineClient, target: TargetRequest, loaded: LoadedBuild,
-        query: TradeQueryData, chaosPerDivine: number | undefined, settings: BuildSettings, runLog: Logger, request: RunRequest,
-    ): Promise<void> {
+    /** The run's header, from the request and the prepared slot. */
+    private headerFor(meta: HeaderMeta, setup: RunSetup): RunHeader {
+        const { spec, query, loaded, settings, request, bands, chaosPerDivine } = setup;
+        const { budget, minBudget } = meta;
+        return {
+            runId: meta.runId,
+            buildId: request.buildId,
+            buildName: basename(meta.file).replace(/\.xml$/i, ''),
+            slot: spec.slot,
+            league: meta.league,
+            budgetLabel: minBudget === undefined ? budgetLabel(budget) : `${budgetLabel(minBudget)} to ${budgetLabel(budget)}`,
+            budgetChaos: meta.budgetChaos,
+            targetLabel: loaded.summary.targetLabel,
+            depth: request.depth,
+            perBand: DEPTH_PER_BAND[request.depth],
+            listing: request.listing,
+            minGainPct: settings.minGainPct,
+            blend: settings.blend,
+            chaosPerDivine: chaosPerDivine ?? null,
+            startedAtMs: meta.startedMs,
+            baselineDamage: loaded.stats.damage,
+            baselineEhp: loaded.summary.ehp,
+            currentItem: query.item.name || query.item.base || 'nothing',
+            currentView: loaded.summary.equipped.find((e: EquippedInfo) => e.slot === spec.slot)?.view ?? null,
+            weightedStats: spec.weights.length,
+            // The build's hard needs only: the plan's includes are in `plan`.
+            hardNeeds: spec.requirements
+                .filter((r) => r.origin === 'strip')
+                .map((r) => r.label.replace(/^Required: /, '').replace(/, from strip$/, '')),
+            plan: toUiRunPlan(setup.plan, spec, meta.planNotes),
+            levelFilter: levelFilterLabel(settings.levelFilter, spec.maxLevelRequirement),
+            searchedFor: [...spec.weights]
+                .sort((a: WeightedStat, b: WeightedStat) => b.weight - a.weight)
+                .map((w: WeightedStat) => ({ statId: w.statId, label: meta.catalog?.describe(w.statId) ?? w.statId, weight: w.weight })),
+            bands: bands.map(toUiBand),
+        };
+    }
+
+    /** The feed's first lines: replay mode, what is searched for, and what the slot plan changed. */
+    private feedStart(state: RunState, prepared: PreparedSlot): void {
         const header: RunHeader = state.header;
-        const gated: RunTrade = this.gatedTrade(state);
+        const spec: SlotSearchSpec = prepared.spec;
         if (this.options.replay !== undefined) {
             this.feed(state, 'warn', 'Replay mode: recorded listings, not the live trade site.');
         }
-        const labelOf = (bandId: string): string => bands.find((b: PriceBand) => b.id === bandId)?.label ?? bandId;
-        this.feed(state, 'info', `Searching ${header.slot}: ${spec.weights.length} weighted stats from PoB${header.hardNeeds.length > 0 ? `, needs ${header.hardNeeds.join(', ')}` : ''}.`);
-        const result: RunResult = await runSlotSearch(
-            { league: header.league, spec: spec, baseline: loaded.stats, blend: settings.blend, depth: header.perBand, chaosPerDivine: chaosPerDivine, value: { minGainPct: settings.minGainPct }, signal: state.abort.signal },
-            gated,
-            engineAdapter(client, request.slot, target),
-            (event: RunEvent) => {
-                this.onRunEvent(state, event, labelOf, runLog);
-            },
-        );
-        this.complete(state, { spec: spec, bands: bands, target: target, loaded: loaded, query: query, chaosPerDivine: chaosPerDivine, settings: settings, request: request, result: result, finishedMs: 0 }, result, runLog, header.startedAtMs);
+        const needs: string = header.hardNeeds.length > 0 ? `, needs ${header.hardNeeds.join(', ')}` : '';
+        this.feed(state, 'info', `Searching ${header.slot}: ${spec.weights.length} weighted stats from PoB${needs}.`);
+        const included: number = spec.requirements.filter((r) => r.origin === 'plan').length;
+        if (spec.baseType !== null || included > 0 || spec.exclusions.length > 0 || spec.defences.length > 0) {
+            const parts: string[] = [];
+            if (spec.baseType !== null) {
+                parts.push(spec.baseType);
+            }
+            parts.push(`${included} included stat${included === 1 ? '' : 's'}`, `${spec.exclusions.length} excluded`);
+            if (spec.defences.length > 0) {
+                parts.push(spec.defences.map((d) => d.label.replace(/, from plan$/, '')).join(', '));
+            }
+            if (spec.influences.length > 0) {
+                parts.push(`influence: ${spec.influences.join(', ')}`);
+            }
+            this.feed(state, 'info', `Slot plan: ${parts.join(', ')}; ${spec.pruned.length} weights taken out.`);
+        }
+        for (const note of prepared.check.notes) {
+            this.feed(state, 'info', note.text);
+        }
+    }
+
+    /** What runSlotSearch and deepenSlotSearch share: the spec, the build's baseline and the user's settings. */
+    private searchOptions(state: RunState, setup: RunSetup): SlotRunInput {
+        return {
+            league: state.header.league,
+            spec: setup.spec,
+            baseline: setup.loaded.stats,
+            blend: setup.settings.blend,
+            depth: state.header.perBand,
+            chaosPerDivine: setup.chaosPerDivine,
+            value: { minGainPct: setup.settings.minGainPct },
+            signal: state.abort.signal,
+        };
+    }
+
+    /**
+     * Runs `body` under the PoB worker lock as run `runId`, resolving with the header once `body` calls
+     * `started(header)`. A failure before that rejects (the caller sees it as the start failing); every failure
+     * goes to `onFailure` first, so it can log it or put it on the run. The limit pushes and the run's own log
+     * span the whole task.
+     */
+    private underWorkerLock(
+        runId: string,
+        body: (client: EngineClient, runLog: Logger, started: (header: RunHeader) => void) => Promise<void>,
+        onFailure: (error: unknown, headerSent: boolean, runLog: Logger) => void,
+    ): Promise<RunHeader> {
+        return new Promise<RunHeader>((resolveHeader: (h: RunHeader) => void, rejectHeader: (e: Error) => void) => {
+            let headerSent: boolean = false;
+            const started = (header: RunHeader): void => {
+                this.startLimitPushes();
+                headerSent = true;
+                resolveHeader(header);
+            };
+            void this.options.session
+                .exclusive(async (client: EngineClient) => {
+                    const { logger } = this.options;
+                    logger.startRun(runId);
+                    const runLog: Logger = logger.area('run');
+                    try {
+                        await body(client, runLog, started);
+                    } catch (error: unknown) {
+                        onFailure(error, headerSent, runLog);
+                        if (!headerSent) {
+                            rejectHeader(toError(error));
+                        }
+                    } finally {
+                        this.stopLimitPushes();
+                        logger.endRun();
+                    }
+                })
+                .catch((error: unknown) => {
+                    // The task never ran (no engine client could be made): the caller must still get an answer.
+                    if (!headerSent) {
+                        rejectHeader(toError(error));
+                    }
+                });
+        });
     }
 
     /** Pause gate in front of the trade site (or the replay). */
-    private gatedTrade(state: RunState): RunTrade {
+    private gatedTrade(gate: PauseGate): RunTrade {
         const site: RunTrade = this.options.replay?.trade ?? this.options.trade.client;
         return {
             search: async (league: string, body: TradeSearchBody, signal?: AbortSignal): Promise<SearchResponse> => {
-                await state.gate.wait(signal);
+                await gate.wait(signal);
                 return site.search(league, body, signal);
             },
             fetch: async (ids: readonly string[], queryId?: string, signal?: AbortSignal): Promise<FetchResponse> => {
-                await state.gate.wait(signal);
+                await gate.wait(signal);
                 return site.fetch(ids, queryId, signal);
             },
         };
@@ -567,6 +907,8 @@ export class RunController {
                 currentItem: ctx.query.item,
                 spec: ctx.spec,
                 result: result,
+                plan: ctx.plan,
+                levelFilter: settings.levelFilter,
             });
             pruneRuns(runsDir);
         } catch (error: unknown) {
@@ -576,12 +918,22 @@ export class RunController {
         // A run that finished while paused must not leave the gate shut: Search deeper reuses it.
         state.gate.resume();
         state.summary = toUiSummary(result, header.league, state.baseline, finished, passStartedMs, runFile);
-        const phase: RunPhase = result.stoppedReason === undefined ? 'done' : result.stoppedReason === 'Cancelled.' ? 'cancelled' : 'stopped';
+        const phase: RunPhase =
+            result.stoppedReason === undefined ? 'done' : result.stoppedReason === 'Cancelled.' ? 'cancelled' : 'stopped';
         if (result.stoppedReason !== undefined && phase === 'stopped') {
             this.feed(state, 'warn', `Stopped early: ${result.stoppedReason}`);
         }
-        this.feed(state, 'info', `Done in ${Math.round((finished - passStartedMs) / 1000)} s: ${result.counts.scored} scored. ${result.verdict.note}`);
-        runLog.log('info', 'run done', { seconds: (finished - passStartedMs) / 1000, counts: result.counts, verdict: result.verdict.note, stoppedReason: result.stoppedReason ?? null });
+        this.feed(
+            state,
+            'info',
+            `Done in ${Math.round((finished - passStartedMs) / 1000)} s: ${result.counts.scored} scored. ${result.verdict.note}`,
+        );
+        runLog.log('info', 'run done', {
+            seconds: (finished - passStartedMs) / 1000,
+            counts: result.counts,
+            verdict: result.verdict.note,
+            stoppedReason: result.stoppedReason ?? null,
+        });
         this.options.emit({ kind: 'run-done', runId: header.runId, summary: state.summary });
         this.setPhase(state, phase);
     }
@@ -622,7 +974,11 @@ export class RunController {
                 runLog.log('debug', 'skipped', { id: event.listingId, reason: event.reason });
                 break;
             case 'missing':
-                this.feed(state, 'info', `${event.listingIds.length} listing${event.listingIds.length === 1 ? ' was' : 's were'} gone before the fetch.`);
+                this.feed(
+                    state,
+                    'info',
+                    `${event.listingIds.length} listing${event.listingIds.length === 1 ? ' was' : 's were'} gone before the fetch.`,
+                );
                 runLog.log('info', 'gone before fetch', { ids: event.listingIds.length });
                 break;
         }
@@ -639,7 +995,11 @@ export class RunController {
         } else if (event.kind === 'retry-after' && active && r !== undefined) {
             this.feed(r, 'warn', `The site said wait ${event.seconds} s (429). Waiting, not retrying into it.`);
         } else if (event.kind === 'stop' && active && r !== undefined) {
-            this.feed(r, 'error', `Rate limit: a ${Math.round(event.waitMs / 1000)} s wait is too long, so the run stops (${event.reason}).`);
+            this.feed(
+                r,
+                'error',
+                `Rate limit: a ${Math.round(event.waitMs / 1000)} s wait is too long, so the run stops (${event.reason}).`,
+            );
         } else if (event.kind === 'send') {
             this.wait = undefined;
         }
@@ -687,8 +1047,13 @@ export class RunController {
 export function deeperPlan(records: readonly SearchRecord[], bands: readonly PriceBand[], perBand: number): UiSearch[] {
     const planned: Map<SearchRecord, number> = new Map<SearchRecord, number>();
     for (const band of bands) {
-        const ok: SearchRecord[] = records.filter((x: SearchRecord) => x.bandId === band.id && x.error === undefined && x.idList.length > 0);
-        const counts: number[] = splitDepth(perBand, ok.map((x: SearchRecord) => ({ total: x.total ?? 0, available: x.idList.length })));
+        const ok: SearchRecord[] = records.filter(
+            (x: SearchRecord) => x.bandId === band.id && x.error === undefined && x.idList.length > 0,
+        );
+        const counts: number[] = splitDepth(
+            perBand,
+            ok.map((x: SearchRecord) => ({ total: x.total ?? 0, available: x.idList.length })),
+        );
         ok.forEach((x: SearchRecord, i: number) => {
             planned.set(x, counts[i] ?? 0);
         });

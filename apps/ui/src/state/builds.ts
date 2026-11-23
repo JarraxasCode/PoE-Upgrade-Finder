@@ -6,7 +6,8 @@ import type { Signal } from '@preact/signals';
 import type { BuildSettings, BuildState, BuildsList, GearSlot } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import type { Loadable } from './loadable.ts';
-import { messageOf, readyValue } from './loadable.ts';
+import { readyValue } from './loadable.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const buildsList: Signal<Loadable<BuildsList>> = signal<Loadable<BuildsList>>({ kind: 'loading' });
 export const selectedBuildId: Signal<string | null> = signal<string | null>(null);

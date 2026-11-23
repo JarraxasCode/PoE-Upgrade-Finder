@@ -4,6 +4,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import type { Logger } from '@poe-upgrade-finder/logging';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export function readJsonFile<T>(file: string, read: (value: unknown, path: string) => T, fallback: () => T, log: Logger): T {
     let text: string;
@@ -19,7 +20,10 @@ export function readJsonFile<T>(file: string, read: (value: unknown, path: strin
     try {
         return read(JSON.parse(text.replace(/^﻿/, '')), 'file');
     } catch (error: unknown) {
-        log.log('warn', 'a settings file is invalid; using defaults', { file: file, error: error instanceof Error ? error.message : String(error) });
+        log.log('warn', 'a settings file is invalid; using defaults', {
+            file: file,
+            error: messageOf(error),
+        });
         return fallback();
     }
 }

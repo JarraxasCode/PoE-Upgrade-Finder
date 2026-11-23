@@ -16,7 +16,10 @@ export interface BuildsDir {
 
 /** XML attribute text → plain text (the five entities PoB writes). */
 function unescapeXml(s: string): string {
-    return s.replace(/&(quot|apos|lt|gt|amp);/g, (_m: string, e: string) => ({ quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' })[e] ?? '');
+    return s.replace(
+        /&(quot|apos|lt|gt|amp);/g,
+        (_m: string, e: string) => ({ quot: '"', apos: "'", lt: '<', gt: '>', amp: '&' })[e] ?? '',
+    );
 }
 
 /** One attribute of the first <tag …> in some XML text. */
@@ -123,7 +126,12 @@ export function listBuilds(found: BuildsDir): BuildsList {
             return { dir: found.dir, source: found.source, builds: [], error: `${found.dir} is not a folder.` };
         }
     } catch {
-        return { dir: found.dir, source: found.source, builds: [], error: `The PoB Builds folder wasn't found: ${found.dir}. Set it in Settings.` };
+        return {
+            dir: found.dir,
+            source: found.source,
+            builds: [],
+            error: `The PoB Builds folder wasn't found: ${found.dir}. Set it in Settings.`,
+        };
     }
     walk(found.dir, 0);
     builds.sort((a: BuildEntry, b: BuildEntry) => b.modifiedMs - a.modifiedMs);

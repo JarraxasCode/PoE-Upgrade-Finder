@@ -14,7 +14,7 @@
 -- and a stale id is refused. Cancel is the client's job: it sends `score` in small batches and stops
 -- sending, so a cancel takes effect between items.
 --
--- Commands: ping, loadBuild, stats, strip, tradeQuery, score, shutdown (see each handler below).
+-- Commands: ping, loadBuild, stats, strip, tradeQuery, score, baseTypes, slotData, shutdown (see each handler below).
 
 ENGINE_DIR = (arg and arg[0] or ""):match("^(.*[/\\])") or "./"
 
@@ -81,6 +81,7 @@ end
 
 local statblock = engineRequire("statblock")
 local target = engineRequire("target")
+local slotdata = engineRequire("slotdata")
 
 local pobVersion = launch and launch.versionNumber or "?"
 
@@ -158,7 +159,8 @@ local function pobMessage(text)
 end
 
 local function itemInfo(item)
-	return { name = item.name, base = item.baseName, rarity = item.rarity }
+	-- type: PoB's item type ("Boots", "One Handed Sword"), the key of the slot data (slotData).
+	return { name = item.name, base = item.baseName, rarity = item.rarity, type = item.base and item.base.type or nil }
 end
 
 -- Parses an item text the way PoB's own item import does (the kit's rule).
@@ -298,10 +300,10 @@ end
 function commands.tradeQuery(req, ctx)
 	requireBuild(req)
 	local slotName, slot = requireSlot(req)
+	-- An empty slot is fine (issue #33): PoB's generator takes the category from the slot name and tests mods
+	-- on a blank item, as its own GUI does. An empty weapon slot reads as a one-handed weapon; the search's
+	-- category then comes from the slot plan's item type.
 	local item = build.itemsTab.items[slot.selItemId]
-	if not item then
-		fail("empty-slot", slotName .. " has no item; PoB's generator needs one to pick the item category")
-	end
 	local dpsWeight = req.dpsWeight == nil and 1.0 or req.dpsWeight
 	local ehpWeight = req.ehpWeight == nil and 0.5 or req.ehpWeight
 	if type(dpsWeight) ~= "number" or type(ehpWeight) ~= "number" or dpsWeight < 0 or ehpWeight < 0 then
@@ -398,7 +400,7 @@ function commands.tradeQuery(req, ctx)
 	return {
 		slot = slotName,
 		target = target.describe(resolved),
-		item = itemInfo(item),
+		item = item and itemInfo(item) or { name = "", base = "", rarity = "NONE" },
 		category = { query = calcContext.itemCategoryQueryStr, generator = calcContext.itemCategory },
 		statWeights = { { stat = damageStat, weight = dpsWeight }, { stat = "TotalEHP", weight = ehpWeight } },
 		affixQuality = main.defaultItemAffixQuality,
@@ -464,6 +466,22 @@ function commands.score(req, ctx)
 		end
 	end)
 	return { count = #req.items, failed = failed, gcRuns = state.gcRuns, seconds = os.clock() - started }
+end
+
+-- baseTypes {} -> { types: [{ baseType, bases }] }: every item type with bases, for picking a base type.
+function commands.baseTypes()
+	return { types = slotdata.baseTypes() }
+end
+
+-- slotData { baseType } -> what can roll on each base of that type (lua/slotdata.lua). Needs no build.
+function commands.slotData(req)
+	local baseType = requireString(req, "baseType")
+	local result = slotdata.build(baseType)
+	if not result then
+		fail("bad-request", "no base type named " .. baseType)
+	end
+	result.pobVersion = pobVersion
+	return result
 end
 
 -- shutdown {} -> {} and the engine exits.

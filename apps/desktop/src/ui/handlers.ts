@@ -6,7 +6,24 @@ import { join } from 'node:path';
 import { dialog, shell } from 'electron';
 import type { BrowserWindow, OpenDialogReturnValue, SaveDialogReturnValue } from 'electron';
 import type {
-    AppInfo, AppSettings, PobUpdateState, BuildSettings, BuildsList, BuildSummary, GearSlot, LimitPanel, WeightPreview, LogsView, RateState, RunHeader, RunPhase, RunRequest, RunSnapshot, SignInState,
+    AppInfo,
+    AppSettings,
+    PobUpdateState,
+    BuildSettings,
+    BuildsList,
+    BuildSummary,
+    GearSlot,
+    LimitPanel,
+    WeightPreview,
+    LogsView,
+    RateState,
+    RunHeader,
+    RunPhase,
+    RunRequest,
+    RunSnapshot,
+    SignInState,
+    SlotEditorData,
+    SlotPlan,
 } from '@poe-upgrade-finder/ipc';
 import { UserFacingError } from './ipc-server.ts';
 import type { Handlers } from './ipc-server.ts';
@@ -19,6 +36,8 @@ import type { PobRebuild, PobSmokeCheck, PobUpdates } from '../services/pob-upda
 import { launchedByLauncher, localAppFolder, pobLicenseOf, pobVersionOf, writeRemoveMarker } from '../services/remove.ts';
 import { dayStamp } from '@poe-upgrade-finder/logging';
 import type { SettingsStore } from '../services/settings-store.ts';
+import { slotEditorData } from '../services/slot-data.ts';
+import type { SlotDataService } from '../services/slot-data.ts';
 import type { TradeServices } from '../services/trade-services.ts';
 
 export interface AppServices {
@@ -43,6 +62,8 @@ export interface AppServices {
     readonly store: SettingsStore;
     readonly session: EngineSession;
     readonly trade: TradeServices;
+    /** PoB's mods per item type (cached), for the slot plan editor and runs. */
+    readonly slotData: SlotDataService;
     readonly runs: () => RunController;
     readonly window: () => BrowserWindow | undefined;
     /** The Builds folder setting changed: watch the new folder and tell the renderer. */
@@ -105,8 +126,7 @@ export function createHandlers(services: AppServices): Handlers {
                 detail:
                     `This deletes the app's files (${local}) and its settings, logs, saved runs and pathofexile.com sign-in (${services.userData}).
 
-` +
-                    'Your Path of Building builds are not touched. The app closes, and then you can delete the exe.',
+` + 'Your Path of Building builds are not touched. The app closes, and then you can delete the exe.',
                 buttons: ['Remove', 'Cancel'],
                 defaultId: 1,
                 cancelId: 1,
@@ -141,7 +161,8 @@ export function createHandlers(services: AppServices): Handlers {
         'settings.pickBuildsDir': async (): Promise<string | null> => {
             const win: BrowserWindow | undefined = services.window();
             const options = { title: 'Choose the PoB Builds folder', properties: ['openDirectory' as const] };
-            const picked: OpenDialogReturnValue = win === undefined ? await dialog.showOpenDialog(options) : await dialog.showOpenDialog(win, options);
+            const picked: OpenDialogReturnValue =
+                win === undefined ? await dialog.showOpenDialog(options) : await dialog.showOpenDialog(win, options);
             return picked.canceled ? null : (picked.filePaths[0] ?? null);
         },
 
@@ -149,7 +170,9 @@ export function createHandlers(services: AppServices): Handlers {
 
         'build.select': (params: { readonly buildId: string; readonly target: string | null }): Promise<BuildSummary> => {
             if (services.runs().busy) {
-                return Promise.reject(new UserFacingError('A run is going: PoB loads another build or target once it ends (or cancel it).'));
+                return Promise.reject(
+                    new UserFacingError('A run is going: PoB loads another build or target once it ends (or cancel it).'),
+                );
             }
             const file: string | undefined = buildFileFor(services, params.buildId);
             if (file === undefined) {
@@ -158,13 +181,29 @@ export function createHandlers(services: AppServices): Handlers {
             return session.select(params.buildId, file, params.target ?? 'saved');
         },
 
-        'build.settings.get': (params: { readonly buildId: string }): Promise<BuildSettings> => Promise.resolve(store.buildSettings(params.buildId)),
+        'build.settings.get': (params: { readonly buildId: string }): Promise<BuildSettings> =>
+            Promise.resolve(store.buildSettings(params.buildId)),
 
         'build.settings.save': (params: { readonly buildId: string; readonly settings: BuildSettings }): Promise<BuildSettings> =>
             Promise.resolve(store.saveBuildSettings(params.buildId, params.settings)),
 
-        'weights.preview': (params: { readonly buildId: string; readonly slot: GearSlot; readonly target: string }): Promise<WeightPreview> =>
-            services.runs().previewWeights(params.buildId, params.slot, params.target),
+        'weights.preview': (params: {
+            readonly buildId: string;
+            readonly slot: GearSlot;
+            readonly target: string;
+            readonly plan: SlotPlan | null;
+        }): Promise<WeightPreview> => services.runs().previewWeights(params.buildId, params.slot, params.target, params.plan),
+
+        'slot.data': async (params: {
+            readonly slot: GearSlot;
+            readonly itemType: string;
+            readonly base: string | null;
+        }): Promise<SlotEditorData> => {
+            const data = await services.slotData.get(params.itemType);
+            // The site's pseudo stats for the Totals list (issue #26); the cached stat list, fetched once a week.
+            const catalog = await trade.catalog();
+            return slotEditorData(data, params.slot, params.base, catalog?.pseudoStats() ?? [], (id: string) => catalog?.rank(id));
+        },
 
         'signin.status': (): Promise<SignInState> => Promise.resolve(trade.signInState),
         'signin.check': (): Promise<SignInState> => trade.check(),
@@ -174,7 +213,8 @@ export function createHandlers(services: AppServices): Handlers {
         'rate.status': (): Promise<RateState> => Promise.resolve(trade.rateState),
         'rate.get': (): Promise<RateState> => trade.getRate(),
         'rate.refresh': (): Promise<RateState> => trade.refreshRate(),
-        'rate.setManual': (params: { readonly chaosPerDivine: number }): Promise<RateState> => Promise.resolve(trade.setManualRate(params.chaosPerDivine)),
+        'rate.setManual': (params: { readonly chaosPerDivine: number }): Promise<RateState> =>
+            Promise.resolve(trade.setManualRate(params.chaosPerDivine)),
         'rate.useGgg': (): Promise<RateState> => trade.useGgg(),
 
         'run.start': (params: { readonly request: RunRequest }): Promise<RunHeader> => services.runs().start(params.request),
@@ -186,23 +226,31 @@ export function createHandlers(services: AppServices): Handlers {
         'run.limits': (): Promise<LimitPanel> => Promise.resolve(services.runs().limits()),
         'logs.recent': (params: LogQuery): Promise<LogsView> => Promise.resolve(recentLogs(services.logsDir, params)),
 
-        'logs.export': async (params: { readonly runId: string | null }): Promise<{ readonly saved: boolean; readonly file: string | null }> => {
+        'logs.export': async (params: {
+            readonly runId: string | null;
+        }): Promise<{ readonly saved: boolean; readonly file: string | null }> => {
             const win: BrowserWindow | undefined = services.window();
             const options = {
                 title: 'Export logs',
                 defaultPath: join(services.downloadsDir, `poe-upgrade-finder-logs-${dayStamp(Date.now())}.zip`),
                 filters: [{ name: 'Zip', extensions: ['zip'] }],
             };
-            const picked: SaveDialogReturnValue = win === undefined ? await dialog.showSaveDialog(options) : await dialog.showSaveDialog(win, options);
+            const picked: SaveDialogReturnValue =
+                win === undefined ? await dialog.showSaveDialog(options) : await dialog.showSaveDialog(win, options);
             if (picked.canceled || picked.filePath === undefined || picked.filePath === '') {
                 return { saved: false, file: null };
             }
-            writeFileSync(picked.filePath, exportZip(services.logsDir, params.runId, { appVersion: services.appVersion, electron: process.versions.electron }));
+            writeFileSync(
+                picked.filePath,
+                exportZip(services.logsDir, params.runId, { appVersion: services.appVersion, electron: process.versions.electron }),
+            );
             shell.showItemInFolder(picked.filePath);
             return { saved: true, file: picked.filePath };
         },
 
-        'link.open': (params: { readonly runId: string; readonly itemId: string }): Promise<{ readonly opened: boolean; readonly message: string | null }> =>
-            services.runs().openLink(params.runId, params.itemId),
+        'link.open': (params: {
+            readonly runId: string;
+            readonly itemId: string;
+        }): Promise<{ readonly opened: boolean; readonly message: string | null }> => services.runs().openLink(params.runId, params.itemId),
     };
 }

@@ -73,3 +73,5 @@ export function oneOf<T extends string>(value: unknown, path: string, allowed: r
     }
     return found;
 }
+
+export { describeError, messageOf, stackOf, toError } from './errors.ts';

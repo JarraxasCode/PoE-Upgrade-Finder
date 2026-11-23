@@ -27,12 +27,19 @@ test('logs: recent lines from today; export zips today and the run, redacted', (
     try {
         const now: number = Date.now();
         mkdirSync(join(dir, 'runs'));
-        const line = (level: string, msg: string, data?: unknown): string => JSON.stringify({ t: now, level: level, area: 'run', runId: 'Boots-1', msg: msg, data: data });
-        writeFileSync(join(dir, `app-${dayStamp(now)}.jsonl`), [line('info', 'a'), line('error', 'b', { seller: 'Someone', total: 3 })].join('\n') + '\n');
+        const line = (level: string, msg: string, data?: unknown): string =>
+            JSON.stringify({ t: now, level: level, area: 'run', runId: 'Boots-1', msg: msg, data: data });
+        writeFileSync(
+            join(dir, `app-${dayStamp(now)}.jsonl`),
+            [line('info', 'a'), line('error', 'b', { seller: 'Someone', total: 3 })].join('\n') + '\n',
+        );
         writeFileSync(join(dir, 'runs', 'Boots-1.jsonl'), line('info', 'run line') + '\n');
 
         const view = recentLogs(dir, { minLevel: 'warn', area: null, runId: null, limit: 10 });
-        assert.deepEqual(view.lines.map((l) => l.msg), ['b']);
+        assert.deepEqual(
+            view.lines.map((l) => l.msg),
+            ['b'],
+        );
         assert.equal(view.lines[0]?.data, '{"seller":"Someone","total":3}', 'the view shows data as logged (redact() keeps non-secrets)');
 
         const files: Map<string, string> = entries(exportZip(dir, 'Boots-1', { appVersion: '0.1.0' }, now));

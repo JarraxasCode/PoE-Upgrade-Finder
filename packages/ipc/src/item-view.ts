@@ -72,7 +72,8 @@ function mod(value: unknown, path: string): ViewMod {
     return { text: string(r['text'], `${path}.text`), kind: oneOf(r['kind'], `${path}.kind`, MOD_KINDS) };
 }
 
-function icon(value: unknown, path: string): string | null {
+/** An image URL on web.poecdn.com, or null; anything else is refused. */
+export function readIcon(value: unknown, path: string): string | null {
     if (value === null) {
         return null;
     }
@@ -90,7 +91,7 @@ export function readItemView(value: unknown, path: string): ItemView {
         throw new ValidationError(`${path}.itemLevel: expected a number or null`);
     }
     return {
-        icon: icon(r['icon'], `${path}.icon`),
+        icon: readIcon(r['icon'], `${path}.icon`),
         width: cells(r['width'], `${path}.width`),
         height: cells(r['height'], `${path}.height`),
         rarity: oneOf(r['rarity'], `${path}.rarity`, RARITIES),

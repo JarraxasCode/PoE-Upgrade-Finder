@@ -24,6 +24,7 @@ import type { ListedItem, SlotSearchSpec } from './spec.ts';
 import type { PobStats } from './stats.ts';
 import { valuePick } from './value-rule.ts';
 import type { ValueSettings, Verdict } from './value-rule.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export interface RunTrade {
     search(league: string, body: TradeSearchBody, signal?: AbortSignal): Promise<SearchResponse>;
@@ -31,7 +32,13 @@ export interface RunTrade {
 }
 
 export type EngineScore =
-    | { readonly index: number; readonly ok: true; readonly stats: PobStats; readonly unparsed: readonly string[]; readonly validForSlot: boolean }
+    | {
+          readonly index: number;
+          readonly ok: true;
+          readonly stats: PobStats;
+          readonly unparsed: readonly string[];
+          readonly validForSlot: boolean;
+      }
     | { readonly index: number; readonly ok: false; readonly message: string };
 
 export interface RunEngine {
@@ -208,7 +215,10 @@ class Runner {
             }
             if (compiled.dropped.length > 0 && !this.warnedDropped) {
                 this.warnedDropped = true;
-                this.onEvent({ kind: 'warning', message: `${compiled.dropped.length} low-priority weights left out to fit the site's complexity limit.` });
+                this.onEvent({
+                    kind: 'warning',
+                    message: `${compiled.dropped.length} low-priority weights left out to fit the site's complexity limit.`,
+                });
             }
             let response: SearchResponse | undefined;
             let error: string | undefined;
@@ -274,7 +284,10 @@ class Runner {
                         this.onEvent({ kind: 'skipped', listingId: m.id, reason: 'malformed' });
                     }
                 }
-                this.onEvent({ kind: 'warning', message: `${response.malformed.length} listing${response.malformed.length === 1 ? '' : 's'} could not be read and ${response.malformed.length === 1 ? 'was' : 'were'} skipped (details in the log).` });
+                this.onEvent({
+                    kind: 'warning',
+                    message: `${response.malformed.length} listing${response.malformed.length === 1 ? '' : 's'} could not be read and ${response.malformed.length === 1 ? 'was' : 'were'} skipped (details in the log).`,
+                });
             }
             if (response.missing.length > 0) {
                 this.missing += response.missing.length;
@@ -311,7 +324,14 @@ class Runner {
             items: items,
             fetchedIds: [...this.fetchedIds],
             verdict: valuePick(items, this.input.spec.priceBands, this.input.value),
-            counts: { searches: this.records.length, fetched: this.fetched, scored: this.scored, failed: this.failed, skipped: this.skipped, missing: this.missing },
+            counts: {
+                searches: this.records.length,
+                fetched: this.fetched,
+                scored: this.scored,
+                failed: this.failed,
+                skipped: this.skipped,
+                missing: this.missing,
+            },
             stoppedReason: this.stoppedReason,
         };
     }
@@ -331,6 +351,7 @@ class Runner {
                 baseType: l.baseType,
                 itemLevel: l.ilvl,
                 statIds: l.statIds,
+                statLines: l.statLines,
                 seller: l.seller,
                 price: l.price,
                 chaosEquivalent: chaosEquivalent(l.price, this.input.chaosPerDivine),
@@ -359,14 +380,24 @@ class Runner {
             }
             this.scored++;
             bandScored++;
-            const e: EvaluatedItem = evaluateItem(this.input.spec, this.input.baseline, item, { stats: result.stats, unparsed: result.unparsed }, this.input.blend);
+            const e: EvaluatedItem = evaluateItem(
+                this.input.spec,
+                this.input.baseline,
+                item,
+                { stats: result.stats, unparsed: result.unparsed },
+                this.input.blend,
+            );
             this.evaluated.push(e);
             this.onEvent({ kind: 'item', item: e });
         };
         try {
-            await this.engine.score(toScore.map((i: ListedItem) => i.text), onScore, this.input.signal);
+            await this.engine.score(
+                toScore.map((i: ListedItem) => i.text),
+                onScore,
+                this.input.signal,
+            );
         } catch (error: unknown) {
-            throw new StopRun(`PoB engine failed: ${error instanceof Error ? error.message : String(error)}`);
+            throw new StopRun(`PoB engine failed: ${messageOf(error)}`);
         }
         // The engine returns normally on a cancel, with the rest unscored: the run must still read as cancelled.
         this.checkCancelled();
@@ -374,9 +405,17 @@ class Runner {
     }
 }
 
-export async function runSlotSearch(input: SlotRunInput, trade: RunTrade, engine: RunEngine, onEvent: (event: RunEvent) => void): Promise<RunResult> {
+export async function runSlotSearch(
+    input: SlotRunInput,
+    trade: RunTrade,
+    engine: RunEngine,
+    onEvent: (event: RunEvent) => void,
+): Promise<RunResult> {
     if (input.chaosPerDivine === undefined) {
-        onEvent({ kind: 'warning', message: 'No divine rate: only chaos-priced listings are searched. Type a rate in to include divine-priced ones.' });
+        onEvent({
+            kind: 'warning',
+            message: 'No divine rate: only chaos-priced listings are searched. Type a rate in to include divine-priced ones.',
+        });
     }
     const runner: Runner = new Runner(input, trade, engine, onEvent);
     await runner.guard(async () => {
@@ -384,7 +423,10 @@ export async function runSlotSearch(input: SlotRunInput, trade: RunTrade, engine
             runner.checkCancelled();
             const planned: PlannedSearch[] = await runner.searchBand(band);
             const ok: PlannedSearch[] = planned.filter((p: PlannedSearch) => p.response !== undefined);
-            const counts: number[] = splitDepth(input.depth, ok.map((p: PlannedSearch) => ({ total: p.response?.total ?? 0, available: p.response?.ids.length ?? 0 })));
+            const counts: number[] = splitDepth(
+                input.depth,
+                ok.map((p: PlannedSearch) => ({ total: p.response?.total ?? 0, available: p.response?.ids.length ?? 0 })),
+            );
             for (const p of planned) {
                 const index: number = ok.indexOf(p);
                 const record: SearchRecord = {
@@ -405,7 +447,10 @@ export async function runSlotSearch(input: SlotRunInput, trade: RunTrade, engine
                 runner.records.push(record);
                 onEvent({ kind: 'search', record: record });
             }
-            const ordered: string[] = interleave(ok.map((p: PlannedSearch) => p.response?.ids ?? []), counts);
+            const ordered: string[] = interleave(
+                ok.map((p: PlannedSearch) => p.response?.ids ?? []),
+                counts,
+            );
             await runner.fetchAndScore(band, ordered, true);
         }
     });
@@ -417,14 +462,28 @@ export async function runSlotSearch(input: SlotRunInput, trade: RunTrade, engine
  * split for the new depth, and only ids not fetched before are fetched and scored; the filter and the verdict
  * then run over every item, old and new. Ids that expired on the site come back as missing (V16: at least 15 min).
  */
-export async function deepenSlotSearch(input: SlotRunInput, prior: PriorRun, trade: RunTrade, engine: RunEngine, onEvent: (event: RunEvent) => void): Promise<RunResult> {
+export async function deepenSlotSearch(
+    input: SlotRunInput,
+    prior: PriorRun,
+    trade: RunTrade,
+    engine: RunEngine,
+    onEvent: (event: RunEvent) => void,
+): Promise<RunResult> {
     const runner: Runner = new Runner(input, trade, engine, onEvent, prior);
     await runner.guard(async () => {
         for (const band of input.spec.priceBands) {
             runner.checkCancelled();
-            const ok: SearchRecord[] = prior.searches.filter((r: SearchRecord) => r.bandId === band.id && r.error === undefined && r.idList.length > 0);
-            const counts: number[] = splitDepth(input.depth, ok.map((r: SearchRecord) => ({ total: r.total ?? 0, available: r.idList.length })));
-            const ordered: string[] = interleave(ok.map((r: SearchRecord) => r.idList), counts);
+            const ok: SearchRecord[] = prior.searches.filter(
+                (r: SearchRecord) => r.bandId === band.id && r.error === undefined && r.idList.length > 0,
+            );
+            const counts: number[] = splitDepth(
+                input.depth,
+                ok.map((r: SearchRecord) => ({ total: r.total ?? 0, available: r.idList.length })),
+            );
+            const ordered: string[] = interleave(
+                ok.map((r: SearchRecord) => r.idList),
+                counts,
+            );
             await runner.fetchAndScore(band, ordered, false);
         }
     });

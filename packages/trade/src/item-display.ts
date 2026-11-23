@@ -59,7 +59,16 @@ export interface ItemDisplay {
 /** Only images from GGG's CDN are kept; the renderer's CSP allows nothing else. */
 export const ICON_ORIGIN: string = 'https://web.poecdn.com/';
 
-const TONES: Readonly<Record<number, DisplayTone>> = { 0: 'plain', 1: 'augmented', 2: 'unmet', 3: 'plain', 4: 'fire', 5: 'cold', 6: 'lightning', 7: 'chaos' };
+const TONES: Readonly<Record<number, DisplayTone>> = {
+    0: 'plain',
+    1: 'augmented',
+    2: 'unmet',
+    3: 'plain',
+    4: 'fire',
+    5: 'cold',
+    6: 'lightning',
+    7: 'chaos',
+};
 
 /** "[Poison|Poisons]" → "Poisons", "[Onslaught]" → "Onslaught" (the site's link markup). */
 export function stripMarkup(text: string): string {
@@ -84,11 +93,16 @@ function readRarity(item: JsonRecord): DisplayRarity {
         return r;
     }
     switch (int(item['frameType'])) {
-        case 0: return 'normal';
-        case 1: return 'magic';
-        case 2: return 'rare';
-        case 3: return 'unique';
-        default: return 'other';
+        case 0:
+            return 'normal';
+        case 1:
+            return 'magic';
+        case 2:
+            return 'rare';
+        case 3:
+            return 'unique';
+        default:
+            return 'other';
     }
 }
 

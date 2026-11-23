@@ -5,7 +5,7 @@ import { priceBands } from '../src/bands.ts';
 import { DEFAULT_FLOORS } from '../src/floors.ts';
 import { compileQuery, predictComplexity, QueryCompileError } from '../src/query-compiler.ts';
 import type { CompiledQuery } from '../src/query-compiler.ts';
-import { saveSpec } from '../src/spec.ts';
+import { maxLevelRequirement, saveSpec } from '../src/spec.ts';
 import type { PobTradeQuery, RunContext, SearchRequirement, SlotSearchSpec, WeightedStat } from '../src/spec.ts';
 import { v1SpecBuilder } from '../src/v1.ts';
 import { baseStats } from './fixtures.ts';
@@ -15,7 +15,15 @@ function pobQuery(weights: number): PobTradeQuery {
     for (let i: number = 0; i < weights; i++) {
         filters.push({ id: `explicit.stat_${1000 + i}`, weight: 3 - i * 0.05 });
     }
-    return { category: { query: 'armour.boots' }, query: { stats: [{ type: 'weight', filters: filters }, { type: 'not', filters: [] }] } };
+    return {
+        category: { query: 'armour.boots' },
+        query: {
+            stats: [
+                { type: 'weight', filters: filters },
+                { type: 'not', filters: [] },
+            ],
+        },
+    };
 }
 
 function context(weights: number, stripped = baseStats()): RunContext {
@@ -53,8 +61,14 @@ test('the v1 spec takes PoB weights in order, strip needs, floors and the catego
     const spec: SlotSearchSpec = v1SpecBuilder().build(context(3, baseStats({ ChaosResist: 31, ChaosResistTotal: 31 })));
     assert.equal(spec.category, 'armour.boots');
     assert.equal(spec.weightGroupType, 'weight');
-    assert.deepEqual(spec.weights.map((w: WeightedStat) => w.statId), ['explicit.stat_1000', 'explicit.stat_1001', 'explicit.stat_1002']);
-    assert.deepEqual(spec.requirements.map((r: SearchRequirement) => [r.statId, r.min]), [['pseudo.pseudo_total_chaos_resistance', 19]]);
+    assert.deepEqual(
+        spec.weights.map((w: WeightedStat) => w.statId),
+        ['explicit.stat_1000', 'explicit.stat_1001', 'explicit.stat_1002'],
+    );
+    assert.deepEqual(
+        spec.requirements.map((r: SearchRequirement) => [r.statId, r.min]),
+        [['pseudo.pseudo_total_chaos_resistance', 19]],
+    );
     assert.equal(spec.checks.length, 16);
     assert.deepEqual(spec.noters, []);
     const saved = saveSpec(spec);
@@ -68,8 +82,20 @@ test('compiles the merged query: weighted group first, And group, our filters, n
         query: {
             status: { option: 'securable' },
             stats: [
-                { type: 'weight', filters: [{ id: 'explicit.stat_1000', value: { weight: 3 } }, { id: 'explicit.stat_1001', value: { weight: 2.95 } }] },
-                { type: 'and', filters: [{ id: 'pseudo.r0', value: { min: 10 } }, { id: 'pseudo.r1', value: { min: 11 } }] },
+                {
+                    type: 'weight',
+                    filters: [
+                        { id: 'explicit.stat_1000', value: { weight: 3 } },
+                        { id: 'explicit.stat_1001', value: { weight: 2.95 } },
+                    ],
+                },
+                {
+                    type: 'and',
+                    filters: [
+                        { id: 'pseudo.r0', value: { min: 10 } },
+                        { id: 'pseudo.r1', value: { min: 11 } },
+                    ],
+                },
             ],
             filters: {
                 type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'nonunique' } } },
@@ -93,10 +119,50 @@ test('over budget, the lowest-priority weights are dropped and the requirements 
     assert.equal(q.body.query.stats[1]?.filters.length, 5);
 });
 
+test('over budget, a weight boosted in the review is kept and the smallest weights are dropped instead', () => {
+    const built: SlotSearchSpec = v1SpecBuilder().build({ ...context(40), weightEdits: { 'explicit.stat_1038': 5 } });
+    const spec: SlotSearchSpec = { ...built, requirements: requirements(5) };
+    const q: CompiledQuery = compileQuery(spec, SEARCH);
+    const kept: readonly string[] = q.body.query.stats[0]?.filters.map((f: { readonly id: string }) => f.id) ?? [];
+    assert.equal(kept.length, 33);
+    assert.ok(kept.includes('explicit.stat_1038'));
+    // The kept stats keep PoB's order.
+    assert.equal(kept.at(-1), 'explicit.stat_1038');
+    assert.equal(kept.at(-2), 'explicit.stat_1031');
+    assert.deepEqual(
+        q.dropped.map((w: WeightedStat) => w.statId),
+        [
+            'explicit.stat_1032',
+            'explicit.stat_1033',
+            'explicit.stat_1034',
+            'explicit.stat_1035',
+            'explicit.stat_1036',
+            'explicit.stat_1037',
+            'explicit.stat_1039',
+        ],
+    );
+});
+
 test('no weights: no weighted group, cheapest first; too many requirements is an error', () => {
     const spec: SlotSearchSpec = { ...v1SpecBuilder().build(context(0)), requirements: requirements(1) };
     const q: CompiledQuery = compileQuery(spec, SEARCH);
     assert.deepEqual(q.body.sort, { price: 'asc' });
     assert.equal(q.body.query.stats[0]?.type, 'and');
     assert.throws(() => compileQuery({ ...spec, requirements: requirements(200) }, SEARCH), QueryCompileError);
+});
+
+test('the level filter: up to the character (default), a set level, or none (issue #22)', () => {
+    const levelOf = (spec: SlotSearchSpec): unknown => compileQuery(spec, SEARCH).body.query.filters.req_filters;
+    const ctx: RunContext = context(3);
+    assert.equal(maxLevelRequirement(94), 94);
+    assert.equal(maxLevelRequirement(undefined, { kind: 'character' }), undefined);
+    assert.equal(maxLevelRequirement(94, { kind: 'max', level: 100 }), 100);
+    assert.equal(maxLevelRequirement(94, { kind: 'off' }), undefined);
+    assert.deepEqual(levelOf(v1SpecBuilder().build(ctx)), { filters: { lvl: { max: 94 } } });
+    assert.deepEqual(levelOf(v1SpecBuilder().build({ ...ctx, levelFilter: { kind: 'max', level: 90 } })), {
+        filters: { lvl: { max: 90 } },
+    });
+    const off: SlotSearchSpec = v1SpecBuilder().build({ ...ctx, levelFilter: { kind: 'off' } });
+    assert.equal(levelOf(off), undefined);
+    assert.equal(saveSpec(off).maxLevelRequirement, undefined);
 });

@@ -63,7 +63,9 @@ export function pointKind(item: UiItem): PointKind {
 }
 
 export function chartModel(items: readonly UiItem[], header: Pick<RunHeader, 'budgetChaos' | 'minGainPct'>): ChartModel | null {
-    const plotted: UiItem[] = items.filter((i: UiItem) => i.chaos !== null && i.chaos > 0 && i.gainPct !== null && Number.isFinite(i.gainPct));
+    const plotted: UiItem[] = items.filter(
+        (i: UiItem) => i.chaos !== null && i.chaos > 0 && i.gainPct !== null && Number.isFinite(i.gainPct),
+    );
     if (plotted.length === 0) {
         return null;
     }
@@ -84,7 +86,15 @@ export function chartModel(items: readonly UiItem[], header: Pick<RunHeader, 'bu
     // Worth-a-look points last, so they draw on top of the gray ones.
     const order: Readonly<Record<PointKind, number>> = { other: 0, floor: 1, worth: 2 };
     points.sort((a: ChartPoint, b: ChartPoint) => order[a.kind] - order[b.kind]);
-    return { points: points, x: x, y: y, budgetChaos: header.budgetChaos, minGainPct: header.minGainPct, unplotted: items.length - plotted.length, clipped: clipped };
+    return {
+        points: points,
+        x: x,
+        y: y,
+        budgetChaos: header.budgetChaos,
+        minGainPct: header.minGainPct,
+        unplotted: items.length - plotted.length,
+        clipped: clipped,
+    };
 }
 
 /** Log axis padded a little past the data, with 1-2-5 ticks (1-3 or powers of ten when that would crowd). */
@@ -113,7 +123,7 @@ export function linearAxis(lo: number, hi: number): Axis {
     const span: number = Math.max(hi - lo, 1e-9);
     const raw: number = span / 5;
     const power: number = 10 ** Math.floor(Math.log10(raw));
-    const step: number = ([1, 2, 2.5, 5, 10].map((m: number) => m * power).find((s: number) => s >= raw)) ?? 10 * power;
+    const step: number = [1, 2, 2.5, 5, 10].map((m: number) => m * power).find((s: number) => s >= raw) ?? 10 * power;
     const min: number = Math.floor(lo / step) * step;
     const max: number = Math.ceil(hi / step) * step;
     const ticks: number[] = [];
@@ -155,6 +165,11 @@ export function bestPerBand(items: readonly UiItem[], bands: readonly UiBand[]):
     return bands.map((band: UiBand): BandBest => {
         const inBand: UiItem[] = items.filter((i: UiItem) => i.bandId === band.id);
         const candidates: UiItem[] = inBand.filter((i: UiItem) => i.floorsPass && i.gainPct !== null).sort(byGain);
-        return { band: band, best: candidates[0] ?? null, worth: inBand.filter((i: UiItem) => i.hidden === null).length, scored: inBand.length };
+        return {
+            band: band,
+            best: candidates[0] ?? null,
+            worth: inBand.filter((i: UiItem) => i.hidden === null).length,
+            scored: inBand.length,
+        };
     });
 }

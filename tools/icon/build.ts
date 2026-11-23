@@ -89,14 +89,17 @@ function fail(error: unknown): void {
     app.exit(1);
 }
 
-void app.whenReady().then(async () => {
-    const svg: string = readFileSync(join(DIR, 'icon.svg'), 'utf8');
-    const images: { size: number; png: Buffer }[] = await renderAll(svg, SIZES);
-    writeFileSync(join(DIR, 'icon.ico'), icoFromPngs(images));
-    const big: { size: number; png: Buffer } | undefined = images.find((i) => i.size === 256);
-    if (big !== undefined) {
-        writeFileSync(join(DIR, 'icon-256.png'), big.png);
-    }
-    process.stdout.write(`icon.ico: ${images.map((i) => `${i.size}px ${i.png.length} B`).join(', ')}\n`);
-    app.exit(0);
-}).catch(fail);
+void app
+    .whenReady()
+    .then(async () => {
+        const svg: string = readFileSync(join(DIR, 'icon.svg'), 'utf8');
+        const images: { size: number; png: Buffer }[] = await renderAll(svg, SIZES);
+        writeFileSync(join(DIR, 'icon.ico'), icoFromPngs(images));
+        const big: { size: number; png: Buffer } | undefined = images.find((i) => i.size === 256);
+        if (big !== undefined) {
+            writeFileSync(join(DIR, 'icon-256.png'), big.png);
+        }
+        process.stdout.write(`icon.ico: ${images.map((i) => `${i.size}px ${i.png.length} B`).join(', ')}\n`);
+        app.exit(0);
+    })
+    .catch(fail);

@@ -45,7 +45,12 @@ export function recentLogs(logsDir: string, query: LogQuery): LogsView {
 }
 
 /** The zip's bytes: today's log, the run's log when given and present, and a small info file. */
-export function exportZip(logsDir: string, runId: string | null, info: Readonly<Record<string, string>>, nowMs: number = Date.now()): Buffer {
+export function exportZip(
+    logsDir: string,
+    runId: string | null,
+    info: Readonly<Record<string, string>>,
+    nowMs: number = Date.now(),
+): Buffer {
     const entries: ZipEntry[] = [];
     const today: string = todayLogFile(logsDir, nowMs);
     if (existsSync(today)) {
@@ -57,6 +62,9 @@ export function exportZip(logsDir: string, runId: string | null, info: Readonly<
             entries.push({ name: `runs/${safeRunId(runId)}.jsonl`, data: Buffer.from(redactForExport(readFileSync(runFile, 'utf8'))) });
         }
     }
-    entries.push({ name: 'info.json', data: Buffer.from(JSON.stringify({ ...info, exportedAt: new Date(nowMs).toISOString(), runId: runId }, null, 2)) });
+    entries.push({
+        name: 'info.json',
+        data: Buffer.from(JSON.stringify({ ...info, exportedAt: new Date(nowMs).toISOString(), runId: runId }, null, 2)),
+    });
     return zip(entries, new Date(nowMs));
 }

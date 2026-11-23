@@ -14,6 +14,7 @@ import { openSignInWindow, probeSignIn, TRADE_PARTITION } from '../signin.ts';
 import { postLogout } from '../signout.ts';
 import type { LogoutOutcome } from '../signout.ts';
 import type { SignInState as ProbeState } from '../signin.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const RATE_REFRESH_BLOCK_MS: number = 30_000;
 
@@ -39,11 +40,12 @@ export interface StatListCache {
 export const STAT_LIST_MAX_AGE_MS: number = 7 * 24 * 3600 * 1000;
 
 export function rateInfo(rate: DivineRate): RateInfo {
-    return { chaosPerDivine: rate.chaosPerDivine, source: rate.source, hourMs: rate.hour === undefined ? null : rate.hour * 1000, atMs: rate.at };
-}
-
-function messageOf(error: unknown): string {
-    return error instanceof Error ? error.message : String(error);
+    return {
+        chaosPerDivine: rate.chaosPerDivine,
+        source: rate.source,
+        hourMs: rate.hour === undefined ? null : rate.hour * 1000,
+        atMs: rate.at,
+    };
 }
 
 export class TradeServices {
@@ -81,7 +83,11 @@ export class TradeServices {
         const tradeSession = session.fromPartition(TRADE_PARTITION);
         // Electron's default user agent, unchanged (Hard rules); logged because Cloudflare reacts to it (V15).
         options.logger.area('signin').log('info', 'trade session', { partition: TRADE_PARTITION, userAgent: tradeSession.getUserAgent() });
-        this.client = new TradeClient({ transport: electronTransport(tradeSession), limiter: this.limiter, logger: options.logger.area('trade') });
+        this.client = new TradeClient({
+            transport: electronTransport(tradeSession),
+            limiter: this.limiter,
+            logger: options.logger.area('trade'),
+        });
         this.rates = new DivineRateClient({
             transport: nodeFetchTransport,
             logger: rateLog,
@@ -113,7 +119,7 @@ export class TradeServices {
             this.options.statCache.saveStatList(entries, Date.now());
             this.modCatalog = new ModCatalog(entries);
         } catch (error: unknown) {
-            this.options.logger.area('trade').log('warn', 'stat list not fetched', { error: error instanceof Error ? error.message : String(error) });
+            this.options.logger.area('trade').log('warn', 'stat list not fetched', { error: messageOf(error) });
             this.modCatalog = cached === undefined ? undefined : new ModCatalog(cached.entries);
         }
         return this.modCatalog;
@@ -250,10 +256,23 @@ export class TradeServices {
         this.setRate({ league: league, rate: before, busy: true, error: null, refreshBlockedUntilMs: this.blockedUntil() });
         try {
             const found: RateLookup = await lookup(league);
-            const error: string | null = found.rate === undefined ? 'GGG had no Chaos/Divine rate for this league in the last few hours. Type one in.' : null;
-            return this.setRate({ league: league, rate: found.rate === undefined ? null : rateInfo(found.rate), busy: false, error: error, refreshBlockedUntilMs: this.blockedUntil() });
+            const error: string | null =
+                found.rate === undefined ? 'GGG had no Chaos/Divine rate for this league in the last few hours. Type one in.' : null;
+            return this.setRate({
+                league: league,
+                rate: found.rate === undefined ? null : rateInfo(found.rate),
+                busy: false,
+                error: error,
+                refreshBlockedUntilMs: this.blockedUntil(),
+            });
         } catch (error: unknown) {
-            return this.setRate({ league: league, rate: before, busy: false, error: messageOf(error), refreshBlockedUntilMs: this.blockedUntil() });
+            return this.setRate({
+                league: league,
+                rate: before,
+                busy: false,
+                error: messageOf(error),
+                refreshBlockedUntilMs: this.blockedUntil(),
+            });
         }
     }
 

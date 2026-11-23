@@ -6,31 +6,42 @@
 // captured to the PNG once the renderer says it is ready, and the app exits (0 ok, 1 failed). It lets the
 // UI be checked without anyone clicking.
 
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { app } from 'electron';
 import type { BrowserWindow, Event, IpcMainInvokeEvent } from 'electron';
 import { luahostCommand, pinnedPobDir, POB_DIR_ENV, rebuildQueryMods, resolveEnginePaths } from '@poe-upgrade-finder/engine-client';
-import type { QueryModsReport } from '@poe-upgrade-finder/engine-client';
+import type { EngineClient, QueryModsReport } from '@poe-upgrade-finder/engine-client';
 import { GitHubSource } from '@poe-upgrade-finder/pob-update';
 import { readRunRequest } from '@poe-upgrade-finder/ipc';
-import type { BuildState, BuildsList, EquippedInfo, MainEvent, PobUpdateState, RateState, SignInState } from '@poe-upgrade-finder/ipc';
+import type {
+    BuildState,
+    BuildsList,
+    BuildSummary,
+    EquippedInfo,
+    MainEvent,
+    PobUpdateState,
+    RateState,
+    SignInState,
+} from '@poe-upgrade-finder/ipc';
 import { JsonlLogger } from '@poe-upgrade-finder/logging';
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { RecordedTrade, recordedListings, V19_RATE } from '../run/replay-trade.ts';
 import { RunController } from '../run/run-controller.ts';
-import { CacheDb } from '../services/cache-db.ts';
+import { CacheDb, summaryKey } from '../services/cache-db.ts';
+import { SlotDataService } from '../services/slot-data.ts';
 import { BuildWatcher } from '../services/build-watcher.ts';
 import { EngineSession } from '../services/engine-session.ts';
 import { SettingsStore } from '../services/settings-store.ts';
 import { TradeServices } from '../services/trade-services.ts';
-import { launchedByLauncher, localAppFolder, REMOVE_EXIT_CODE, writeRemoveMarker } from '../services/remove.ts';
+import { launchedByLauncher, localAppFolder, pobVersionOf, REMOVE_EXIT_CODE, writeRemoveMarker } from '../services/remove.ts';
 import { pobSmokeCheck } from '../services/pob-smoke.ts';
 import { PobUpdates } from '../services/pob-updates.ts';
 import { buildFileFor, createHandlers, currentBuilds } from './handlers.ts';
 import type { AppServices } from './handlers.ts';
 import { sendEvent, serveIpc } from './ipc-server.ts';
 import { createMainWindow, isMainWindowSender } from './main-window.ts';
+import { describeError } from '@poe-upgrade-finder/validate';
 
 export interface UiArgs {
     readonly smoke: string | undefined;
@@ -54,7 +65,17 @@ export function parseUiArgs(argv: readonly string[]): UiArgs {
         const i: number = argv.indexOf(flag);
         return i < 0 ? undefined : argv[i + 1];
     };
-    return { smoke: valueOf('--smoke'), route: valueOf('--route'), pob: valueOf('--pob'), smokeLive: argv.includes('--smoke-live'), replay: valueOf('--replay'), smokeRun: valueOf('--smoke-run'), smokeJs: valueOf('--smoke-js'), smokeRemove: argv.includes('--smoke-remove'), debug: argv.includes('--log-debug') };
+    return {
+        smoke: valueOf('--smoke'),
+        route: valueOf('--route'),
+        pob: valueOf('--pob'),
+        smokeLive: argv.includes('--smoke-live'),
+        replay: valueOf('--replay'),
+        smokeRun: valueOf('--smoke-run'),
+        smokeJs: valueOf('--smoke-js'),
+        smokeRemove: argv.includes('--smoke-remove'),
+        debug: argv.includes('--log-debug'),
+    };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -65,7 +86,9 @@ function sleep(ms: number): Promise<void> {
 
 async function capture(win: BrowserWindow, file: string, log: Logger): Promise<void> {
     // Let the renderer paint the latest state first: capturePage can return the previous frame of a hidden window.
-    await win.webContents.executeJavaScript('new Promise((r) => { requestAnimationFrame(() => requestAnimationFrame(r)); setTimeout(r, 500); })');
+    await win.webContents.executeJavaScript(
+        'new Promise((r) => { requestAnimationFrame(() => requestAnimationFrame(r)); setTimeout(r, 500); })',
+    );
     win.webContents.invalidate();
     await sleep(300);
     const image = await win.webContents.capturePage();
@@ -75,10 +98,28 @@ async function capture(win: BrowserWindow, file: string, log: Logger): Promise<v
     process.stdout.write(`smoke: wrote ${file}\n`);
 }
 
-/** Starts a replayed run, captures the Run view mid-run and when done. */
+/**
+ * Starts a replayed run, captures the Run view mid-run and when done. The spec is
+ * "<build id>|<slot>|<budget>|<depth>[|<slot plan .json>]"; without a plan file the slot searches as v0.1 did.
+ */
 async function smokeRunCapture(win: BrowserWindow, file: string, spec: string, runs: RunController, log: Logger): Promise<void> {
-    const [buildId, slot, budget, depth] = spec.split('|');
-    const request = readRunRequest({ buildId: buildId, slot: slot, budget: budget, minBudget: '', target: 'saved', depth: depth ?? 'quick', listing: 'securable' }, 'smoke-run');
+    const [buildId, slot, budget, depth, planFile] = spec.split('|');
+    const plan: unknown =
+        planFile === undefined || planFile === ''
+            ? { slot: slot, itemType: null, base: null, picks: [] }
+            : JSON.parse(readFileSync(planFile, 'utf8'));
+    const request = readRunRequest(
+        {
+            buildId: buildId,
+            slots: [plan],
+            budget: budget,
+            minBudget: '',
+            target: 'saved',
+            depth: depth ?? 'quick',
+            listing: 'securable',
+        },
+        'smoke-run',
+    );
     await runs.start(request);
     await win.webContents.executeJavaScript('location.hash = "#/run"');
     await sleep(2500);
@@ -88,7 +129,9 @@ async function smokeRunCapture(win: BrowserWindow, file: string, spec: string, r
     }
     // Then until the page shows the finished run (the summary event can land after the run reads idle).
     for (let i: number = 0; i < 50; i++) {
-        const done: unknown = await win.webContents.executeJavaScript('!/^(Searching|Paused)/.test(document.querySelector("h1")?.textContent ?? "")');
+        const done: unknown = await win.webContents.executeJavaScript(
+            '!/^(Searching|Paused)/.test(document.querySelector("h1")?.textContent ?? "")',
+        );
         if (done === true) {
             break;
         }
@@ -97,7 +140,15 @@ async function smokeRunCapture(win: BrowserWindow, file: string, spec: string, r
     await sleep(500);
 }
 
-async function smokeCapture(win: BrowserWindow, file: string, route: string | undefined, log: Logger, problems: readonly string[], run?: { readonly spec: string; readonly runs: RunController }, script?: string): Promise<number> {
+async function smokeCapture(
+    win: BrowserWindow,
+    file: string,
+    route: string | undefined,
+    log: Logger,
+    problems: readonly string[],
+    run?: { readonly spec: string; readonly runs: RunController },
+    script?: string,
+): Promise<number> {
     const contents = win.webContents;
     if (contents.isLoading()) {
         await new Promise<void>((done: () => void) => {
@@ -137,7 +188,10 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         process.stdout.write('PoE Upgrade Finder is already running.\n');
         return 0;
     }
-    const store: SettingsStore = new SettingsStore(userData, new JsonlLogger({ dir: join(userData, 'logs'), debug: false }).area('settings'));
+    const store: SettingsStore = new SettingsStore(
+        userData,
+        new JsonlLogger({ dir: join(userData, 'logs'), debug: false }).area('settings'),
+    );
     const logger: JsonlLogger = new JsonlLogger({ dir: join(userData, 'logs'), debug: args.debug || store.settings.debug });
     const uiLog: Logger = logger.area('ui');
     uiLog.log('info', 'app starting', { appVersion: appVersion, electron: process.versions.electron, smoke: args.smoke !== undefined });
@@ -169,9 +223,23 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
             emit({ kind: 'build-state', state: state });
         },
         // The cache is opened just below; these only run once a build loads.
-        gearCache: { get: (id: string) => cache.equipped(id), save: (id: string, items: readonly EquippedInfo[]) => {
-            cache.saveEquipped(id, items);
-        } },
+        gearCache: {
+            get: (id: string) => cache.equipped(id),
+            save: (id: string, items: readonly EquippedInfo[]) => {
+                cache.saveEquipped(id, items);
+            },
+        },
+        summaryCache: {
+            get: (xmlHash: string, targetId: string, pobVersion: string) =>
+                cache.buildSummary(summaryKey({ xmlHash: xmlHash, targetId: targetId, pobVersion: pobVersion, appVersion: appVersion })),
+            save: (xmlHash: string, targetId: string, pobVersion: string, summary: BuildSummary) => {
+                cache.saveBuildSummary(
+                    summaryKey({ xmlHash: xmlHash, targetId: targetId, pobVersion: pobVersion, appVersion: appVersion }),
+                    summary,
+                );
+            },
+        },
+        pobVersion: () => pobVersionOf(pob.liveDir()),
     });
     const cache: CacheDb = new CacheDb(join(userData, 'cache.sqlite'));
     const trade: TradeServices = new TradeServices({
@@ -188,12 +256,22 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
             emit({ kind: 'rate-state', state: state });
         },
     });
+    const slotData: SlotDataService = new SlotDataService({
+        cache: cache,
+        pobVersion: () => pobVersionOf(pob.liveDir()),
+        fetch: (itemType: string) => session.exclusive((client: EngineClient) => client.slotData(itemType)),
+        logger: logger.area('engine'),
+    });
     const services: AppServices = {
         appVersion: appVersion,
         pob: pob,
         pobSmoke: (dir: string) => {
             const loaded = session.loaded;
-            return pobSmokeCheck(dir, loaded === undefined ? undefined : { file: loaded.file, baseline: loaded.load.baseline }, logger.area('pob-update'));
+            return pobSmokeCheck(
+                dir,
+                loaded === undefined ? undefined : { file: loaded.file, baseline: loaded.load.baseline },
+                logger.area('pob-update'),
+            );
         },
         pobSwap: () => session.restart(),
         pobRebuild: async (dir: string) => {
@@ -215,6 +293,7 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         store: store,
         session: session,
         trade: trade,
+        slotData: slotData,
         runs: () => runs,
         window: () => win,
         onBuildsDirChanged: (list: BuildsList) => {
@@ -236,7 +315,10 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         buildFile: (buildId: string) => buildFileFor(services, buildId),
         emit: emit,
         cache: cache,
-        ...(args.replay === undefined ? {} : { replay: { trade: new RecordedTrade(recordedListings(args.replay), 120), chaosPerDivine: V19_RATE } }),
+        slotData: slotData,
+        ...(args.replay === undefined
+            ? {}
+            : { replay: { trade: new RecordedTrade(recordedListings(args.replay), 120), chaosPerDivine: V19_RATE } }),
     });
     if (args.replay !== undefined) {
         uiLog.log('warn', 'replay mode: recorded listings, no trade calls', { file: args.replay });
@@ -292,9 +374,17 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
             return undefined;
         }
         try {
-            return await smokeCapture(win, args.smoke, args.route, uiLog, problems, args.smokeRun === undefined || args.replay === undefined ? undefined : { spec: args.smokeRun, runs: runs }, args.smokeJs);
+            return await smokeCapture(
+                win,
+                args.smoke,
+                args.route,
+                uiLog,
+                problems,
+                args.smokeRun === undefined || args.replay === undefined ? undefined : { spec: args.smokeRun, runs: runs },
+                args.smokeJs,
+            );
         } catch (error: unknown) {
-            process.stderr.write(`smoke failed: ${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+            process.stderr.write(`smoke failed: ${describeError(error)}\n`);
             return 1;
         } finally {
             watcher.stop();

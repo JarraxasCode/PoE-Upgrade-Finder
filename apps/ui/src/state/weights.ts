@@ -3,11 +3,12 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import type { BuildSettings, GearSlot, WeightPreview } from '@poe-upgrade-finder/ipc';
+import type { BuildSettings, GearSlot, SlotPlan, WeightPreview } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import { buildSettings, rememberForBuild } from './builds.ts';
 import { readyValue } from './loadable.ts';
-import { messageOf } from './loadable.ts';
+import { isEmptySlotPlan, planFor } from './plan.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export type PreviewState =
     | { readonly kind: 'idle' }
@@ -17,7 +18,13 @@ export type PreviewState =
 
 export const weightPreview: Signal<PreviewState> = signal<PreviewState>({ kind: 'idle' });
 
+/** The slot's plan is part of the key: a changed plan reloads the review (it shows what the plan prunes). */
 export function previewKey(buildId: string, slot: GearSlot, target: string): string {
+    return `${previewBaseKey(buildId, slot, target)}|${JSON.stringify(planFor(slot))}`;
+}
+
+/** The key without the plan: a review for it is worth keeping on screen while a plan edit reloads it. */
+export function previewBaseKey(buildId: string, slot: GearSlot, target: string): string {
     return `${buildId}|${slot}|${target}`;
 }
 
@@ -30,7 +37,13 @@ export async function loadWeightPreview(buildId: string, slot: GearSlot, target:
     }
     weightPreview.value = { kind: 'loading', key: key };
     try {
-        const preview: WeightPreview = await call('weights.preview', { buildId: buildId, slot: slot, target: target });
+        const plan: SlotPlan = planFor(slot);
+        const preview: WeightPreview = await call('weights.preview', {
+            buildId: buildId,
+            slot: slot,
+            target: target,
+            plan: isEmptySlotPlan(plan) ? null : plan,
+        });
         if (weightPreview.value.kind === 'loading' && weightPreview.value.key === key) {
             weightPreview.value = { kind: 'ready', key: key, preview: preview };
         }

@@ -1,6 +1,5 @@
-// The trade site's rate limits (PLAN.md, Trade client): each window as a meter. In full on the Run view while
-// a run goes; otherwise a slim strip at the top of the Search and Run views (the longer windows, which carry
-// over into the next run), opening to every window.
+// The trade site's rate limits (PLAN.md, Trade client): a slim strip at the top of the Search and Run views,
+// always (the longer windows, which carry over into the next run, and the current wait), opening to every window.
 
 import { useEffect, useState } from 'preact/hooks';
 import type { JSX } from 'preact';
@@ -56,15 +55,25 @@ export function LimitMeters(props: { readonly panel: LimitPanel | null }): JSX.E
                 <div key={pol.policy} class="meter-group">
                     <span class="policy">{POLICY_NAMES[pol.policy] ?? pol.policy}</span>
                     {pol.windows.map((w: LimitWindow, k: number) => (
-                        <div key={k} class="meter" aria-label={`${POLICY_NAMES[pol.policy] ?? pol.policy}, ${periodText(w.periodS)} window: ${w.count} of ${w.allowed}`}>
+                        <div
+                            key={k}
+                            class="meter"
+                            aria-label={`${POLICY_NAMES[pol.policy] ?? pol.policy}, ${periodText(w.periodS)} window: ${w.count} of ${w.allowed}`}
+                        >
                             <span class="muted small num meter-period">{periodText(w.periodS)}</span>
                             <Bar w={w} />
-                            <span class="num small meter-count">{w.count}/{w.allowed}</span>
+                            <span class="num small meter-count">
+                                {w.count}/{w.allowed}
+                            </span>
                         </div>
                     ))}
                 </div>
             ))}
-            {waitS > 0 && p.wait !== null && <p class="warn small" aria-live="polite">Waiting {waitS.toFixed(1)} s · {p.wait.policy}: {p.wait.reason}</p>}
+            {waitS > 0 && p.wait !== null && (
+                <p class="warn small" aria-live="polite">
+                    Waiting {waitS.toFixed(1)} s · {p.wait.policy}: {p.wait.reason}
+                </p>
+            )}
         </div>
     );
 }
@@ -72,9 +81,12 @@ export function LimitMeters(props: { readonly panel: LimitPanel | null }): JSX.E
 const GAUGE_REFRESH_MS: number = 10_000;
 
 function refreshLimits(): void {
-    void call('run.limits', {}).then((panel: LimitPanel) => {
-        limits.value = panel;
-    }, () => undefined);
+    void call('run.limits', {}).then(
+        (panel: LimitPanel) => {
+            limits.value = panel;
+        },
+        () => undefined,
+    );
 }
 
 /** Short windows (a few seconds to a minute) fill and empty with every call; the strip shows the longer ones. */
@@ -106,20 +118,32 @@ export function LimitsStrip(): JSX.Element | null {
                 {p.policies.map((pol: LimitPolicy) => (
                     <span key={pol.policy} class="strip-policy">
                         <span class="muted">{POLICY_NAMES[pol.policy] ?? pol.policy}</span>
-                        {pol.windows.filter((w: LimitWindow) => w.periodS >= STRIP_MIN_PERIOD_S).map((w: LimitWindow, k: number) => (
-                            <span key={k} class="strip-window" title={`${w.count} of ${w.allowed} in ${periodText(w.periodS)}`}>
-                                <span class="muted small">{periodText(w.periodS)}</span>
-                                <Bar w={w} />
-                                <span class="num small">{w.count}/{w.allowed}</span>
-                            </span>
-                        ))}
+                        {pol.windows
+                            .filter((w: LimitWindow) => w.periodS >= STRIP_MIN_PERIOD_S)
+                            .map((w: LimitWindow, k: number) => (
+                                <span key={k} class="strip-window" title={`${w.count} of ${w.allowed} in ${periodText(w.periodS)}`}>
+                                    <span class="muted small">{periodText(w.periodS)}</span>
+                                    <Bar w={w} />
+                                    <span class="num small">
+                                        {w.count}/{w.allowed}
+                                    </span>
+                                </span>
+                            ))}
                     </span>
                 ))}
-                {waitS > 0 && <span class="warn small">waiting {waitS.toFixed(0)} s</span>}
+                {waitS > 0 && p.wait !== null && (
+                    <span class="warn small strip-wait" aria-live="polite" title={`${p.wait.policy}: ${p.wait.reason}`}>
+                        Waiting {waitS.toFixed(0)} s · {POLICY_NAMES[p.wait.policy] ?? p.wait.policy} limit
+                    </span>
+                )}
                 <span class="strip-more muted small">All windows</span>
             </summary>
             <div class="strip-body">
-                <p class="muted small">From the site's own headers, kept up to date as windows pass. The app keeps 30% headroom on every window and waits rather than retrying into a lockout, so the short windows filling up is normal: it just paces the calls. The longer windows carry over into your next run.</p>
+                <p class="muted small">
+                    From the site's own headers, kept up to date as windows pass. The app keeps 30% headroom on every window and waits
+                    rather than retrying into a lockout, so the short windows filling up is normal: it just paces the calls. The longer
+                    windows carry over into your next run.
+                </p>
                 <LimitMeters panel={p} />
             </div>
         </details>

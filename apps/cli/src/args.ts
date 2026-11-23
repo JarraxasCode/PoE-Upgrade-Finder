@@ -19,7 +19,9 @@ export function parseTarget(text: string | undefined): TargetRequest {
     }
     const group: number = Number(match[1]);
     const activeSkill: number = Number(match[2]);
-    return match[3] === undefined ? { kind: 'skill', group: group, activeSkill: activeSkill } : { kind: 'skill', group: group, activeSkill: activeSkill, part: Number(match[3]) };
+    return match[3] === undefined
+        ? { kind: 'skill', group: group, activeSkill: activeSkill }
+        : { kind: 'skill', group: group, activeSkill: activeSkill, part: Number(match[3]) };
 }
 
 export function parseSlot(text: string | undefined): GearSlot {

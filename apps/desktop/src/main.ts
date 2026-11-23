@@ -7,6 +7,7 @@
 import { app } from 'electron';
 import { runHeadless } from './headless.ts';
 import { runUiApp } from './ui/ui-app.ts';
+import { describeError } from '@poe-upgrade-finder/validate';
 
 // In dev (`electron apps/desktop …`) argv[1] is the app folder; the packaged exe has none (process.defaultApp
 // is set only when Electron runs an app given on the command line).
@@ -16,7 +17,7 @@ const argv: readonly string[] = process.argv.slice(process.defaultApp === true ?
 const headless: boolean = argv[0] === 'search';
 
 function report(error: unknown): void {
-    process.stderr.write(`${error instanceof Error ? error.stack ?? error.message : String(error)}\n`);
+    process.stderr.write(`${describeError(error)}\n`);
 }
 
 if (headless) {

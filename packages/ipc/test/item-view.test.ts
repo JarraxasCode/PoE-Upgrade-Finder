@@ -4,7 +4,13 @@ import { readItemDisplay } from '@poe-upgrade-finder/trade';
 import { readItemView, readOptionalItemView } from '../src/item-view.ts';
 
 const ITEM: unknown = {
-    w: 2, h: 2, icon: 'https://web.poecdn.com/gen/image/abc/0c80b843d0/BootsDexInt3.png', name: 'Mind March', typeLine: "Assassin's Boots", rarity: 'Rare', ilvl: 85,
+    w: 2,
+    h: 2,
+    icon: 'https://web.poecdn.com/gen/image/abc/0c80b843d0/BootsDexInt3.png',
+    name: 'Mind March',
+    typeLine: "Assassin's Boots",
+    rarity: 'Rare',
+    ilvl: 85,
     properties: [{ name: 'Evasion Rating', values: [['233', 1]], displayMode: 0 }],
     explicitMods: [{ description: '+116 to maximum Life', domain: 'fractured' }],
 };

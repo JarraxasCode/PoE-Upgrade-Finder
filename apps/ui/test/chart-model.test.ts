@@ -5,9 +5,30 @@ import { bestPerBand, chartModel, gainAxisLow, linearAxis, logAxis, priceTick } 
 
 function item(id: string, gain: number | null, chaos: number | null, over: Partial<UiItem> = {}): UiItem {
     return {
-        id: id, name: id, baseType: 'Boots', itemLevel: 80, price: chaos === null ? null : { amount: chaos, currency: 'chaos' }, chaos: chaos, bandId: 'b0',
-        gainPct: gain, dpsPct: gain, ehpPct: gain, floorsPass: true, failedFloors: [], flags: [], missedTargets: [], notes: [], unparsed: [], text: '', view: null, changes: [],
-        hasBuyLink: true, hidden: null, hiddenBy: null, ...over,
+        id: id,
+        name: id,
+        baseType: 'Boots',
+        itemLevel: 80,
+        price: chaos === null ? null : { amount: chaos, currency: 'chaos' },
+        chaos: chaos,
+        bandId: 'b0',
+        gainPct: gain,
+        dpsPct: gain,
+        ehpPct: gain,
+        floorsPass: true,
+        failedFloors: [],
+        flags: [],
+        missedTargets: [],
+        notes: [],
+        unparsed: [],
+        text: '',
+        view: null,
+        changes: [],
+        planChecks: [],
+        hasBuyLink: true,
+        hidden: null,
+        hiddenBy: null,
+        ...over,
     };
 }
 
@@ -49,7 +70,10 @@ test('chart: plots priced, scored items; clips gains below the axis floor; worth
     const awful = m.points.find((p) => p.item.id === 'awful');
     assert.equal(awful?.clipped, true);
     assert.equal(awful?.y, -10);
-    assert.deepEqual(m.points.slice(-2).map((p) => p.kind), ['floor', 'worth']);
+    assert.deepEqual(
+        m.points.slice(-2).map((p) => p.kind),
+        ['floor', 'worth'],
+    );
     assert.ok(m.x.max > 300);
     assert.equal(chartModel([item('x', null, null)], { budgetChaos: 300, minGainPct: 1 }), null);
 });
@@ -64,7 +88,11 @@ test('gain axis floor: 0 or the lowest point above -10%; below that, only the wo
 });
 
 test('best per band: highest gain passing the floors, even under the minimum; counts per band', () => {
-    const bands: UiBand[] = [{ id: 'b0', label: 'up to 50c', role: 'main' }, { id: 'b1', label: '50c to 300c', role: 'main' }, { id: 'b2', label: 'over', role: 'over' }];
+    const bands: UiBand[] = [
+        { id: 'b0', label: 'up to 50c', role: 'main' },
+        { id: 'b1', label: '50c to 300c', role: 'main' },
+        { id: 'b2', label: 'over', role: 'over' },
+    ];
     const items: UiItem[] = [
         item('a', 0.5, 10, { hidden: 'low-gain' }),
         item('b', 9, 12, { floorsPass: false, hidden: 'floor' }),
@@ -73,5 +101,12 @@ test('best per band: highest gain passing the floors, even under the minimum; co
         item('e', 5, 320, { bandId: 'b2', floorsPass: false, hidden: 'floor' }),
     ];
     const rows = bestPerBand(items, bands);
-    assert.deepEqual(rows.map((r) => [r.best?.id ?? null, r.worth, r.scored]), [['a', 0, 2], ['d', 2, 2], [null, 0, 1]]);
+    assert.deepEqual(
+        rows.map((r) => [r.best?.id ?? null, r.worth, r.scored]),
+        [
+            ['a', 0, 2],
+            ['d', 2, 2],
+            [null, 0, 1],
+        ],
+    );
 });

@@ -49,7 +49,15 @@ export function openSignInWindow(logger: TradeLogger): Promise<void> {
     const note: string = NOTE;
     return new Promise<void>((resolve: () => void) => {
         const prefs: WebPreferences = { partition: TRADE_PARTITION, contextIsolation: true, nodeIntegration: false, sandbox: true };
-        const win: BrowserWindow = new BrowserWindow({ width: 1000, height: 860, center: true, show: false, icon: APP_ICON_FILE, title: `Sign in to pathofexile.com. ${note}`, webPreferences: prefs });
+        const win: BrowserWindow = new BrowserWindow({
+            width: 1000,
+            height: 860,
+            center: true,
+            show: false,
+            icon: APP_ICON_FILE,
+            title: `Sign in to pathofexile.com. ${note}`,
+            webPreferences: prefs,
+        });
         // Started from a terminal, Windows won't let the app take the foreground, so the window opened behind
         // everything (22 Nov). Bring it up on top for a moment, take focus, and flash the taskbar button.
         win.once('ready-to-show', () => {

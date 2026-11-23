@@ -3,7 +3,8 @@ import { test } from 'node:test';
 import { dedupe, parseItemDump, parsePrice, parseTradeJson, rarityOf } from '../src/listings.ts';
 import { parseBlend, parseSlot, parseTarget, UsageError } from '../src/args.ts';
 
-const BOOTS: string = 'Item Class: Boots\nRarity: Rare\nMind March\nAssassin\'s Boots\n--------\nItem Level: 85\n--------\n+43% to Lightning Resistance';
+const BOOTS: string =
+    "Item Class: Boots\nRarity: Rare\nMind March\nAssassin's Boots\n--------\nItem Level: 85\n--------\n+43% to Lightning Resistance";
 
 test('item dump: header label and price, text kept as is', () => {
     const dump: string = `##ITEM Boots | Viper Urge Precursor Greaves | 220 chaos\r\n${BOOTS}\r\n##ITEM Boots | Second | 1 divine\n${BOOTS.replace('Rare', 'Magic')}\n\n`;
@@ -22,11 +23,17 @@ test('trade JSON: finds fetch results anywhere and decodes the item text', () =>
         listing: { price: { type: '~b/o', amount: 1.5, currency: 'divine' }, account: { name: 'x' } },
         item: { rarity: 'Rare', extended: { text: Buffer.from(`${BOOTS}\r\n`).toString('base64') } },
     });
-    const raw: unknown = { fetch: [{ label: 'a', json: { result: [result('a1'), result('a2')] } }, { json: { result: [result('a1'), null] } }], exchange: [{ json: { result: { x: { id: 'not-a-listing' } } } }] };
+    const raw: unknown = {
+        fetch: [{ label: 'a', json: { result: [result('a1'), result('a2')] } }, { json: { result: [result('a1'), null] } }],
+        exchange: [{ json: { result: { x: { id: 'not-a-listing' } } } }],
+    };
     const listings = dedupe(parseTradeJson(raw, 'raw.json'));
-    assert.deepEqual(listings.map((l) => l.id), ['a1', 'a2']);
+    assert.deepEqual(
+        listings.map((l) => l.id),
+        ['a1', 'a2'],
+    );
     assert.equal(listings[0]?.text, BOOTS);
-    assert.equal(listings[0]?.label, 'Mind March, Assassin\'s Boots');
+    assert.equal(listings[0]?.label, "Mind March, Assassin's Boots");
     assert.deepEqual(listings[0]?.price, { amount: 1.5, currency: 'divine' });
     assert.equal(listings[0]?.rarity, 'Rare');
 });

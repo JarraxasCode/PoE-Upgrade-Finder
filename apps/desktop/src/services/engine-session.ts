@@ -12,6 +12,7 @@ import type { BuildState, BuildSummary, EquippedInfo } from '@poe-upgrade-finder
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { buildSummary, targetRequest } from './build-summary.ts';
 import { itemArt } from './base-art.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export interface LoadedBuild {
     readonly buildId: string;
@@ -36,8 +37,28 @@ export interface EngineSessionOptions {
         readonly get: (buildId: string) => readonly EquippedInfo[] | undefined;
         readonly save: (buildId: string, items: readonly EquippedInfo[]) => void;
     };
+    /** The figures from an earlier load of the same save text, target and PoB (cache.sqlite), shown while PoB loads. */
+    readonly summaryCache?: {
+        readonly get: (xmlHash: string, targetId: string, pobVersion: string) => BuildSummary | undefined;
+        readonly save: (xmlHash: string, targetId: string, pobVersion: string, summary: BuildSummary) => void;
+    };
+    /** The PoB version the worker will report (the live copy's manifest), or null when unknown. */
+    readonly pobVersion?: () => string | null;
     /** For tests: a client factory. */
     readonly createClient?: (command: EngineCommand, logger: Logger) => EngineClient;
+}
+
+/** A save as read from disk: its text (BOM dropped), the sha1 of that text, and its modified time. */
+export interface SaveFile {
+    readonly xml: string;
+    readonly xmlHash: string;
+    readonly modifiedMs: number;
+}
+
+export function readSave(file: string): SaveFile {
+    const modifiedMs: number = statSync(file).mtimeMs;
+    const xml: string = readFileSync(file, 'utf8').replace(/^﻿/, '');
+    return { xml: xml, xmlHash: createHash('sha1').update(xml).digest('hex'), modifiedMs: modifiedMs };
 }
 
 export class EngineSession {
@@ -91,21 +112,66 @@ export class EngineSession {
         }
     }
 
+    /** The PoB version the worker will report, without starting it. */
+    public expectedPobVersion(): string | null {
+        try {
+            return this.options.pobVersion?.() ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    /** The cached figures for this save text and target under the PoB version about to load, or null. */
+    private cachedSummary(file: string, targetId: string): BuildSummary | null {
+        const version: string | null = this.expectedPobVersion();
+        if (version === null || this.options.summaryCache === undefined) {
+            return null;
+        }
+        try {
+            const cached: BuildSummary | null = this.options.summaryCache.get(readSave(file).xmlHash, targetId, version) ?? null;
+            if (cached !== null) {
+                this.options.logger.log('info', 'build figures from the cache', { buildId: cached.buildId, target: targetId });
+            }
+            return cached;
+        } catch {
+            return null;
+        }
+    }
+
+    private saveSummary(loaded: LoadedBuild, shown: BuildSummary | null): void {
+        const s: BuildSummary = loaded.summary;
+        if (shown !== null && (shown.damage !== s.damage || shown.ehp !== s.ehp || shown.life !== s.life)) {
+            // The key covers everything the figures depend on, so this would be a missed input: worth knowing.
+            this.options.logger.log('warn', 'cached build figures differed from the live load', {
+                buildId: loaded.buildId,
+                cached: { damage: shown.damage, ehp: shown.ehp, life: shown.life },
+                live: { damage: s.damage, ehp: s.ehp, life: s.life },
+            });
+        }
+        try {
+            this.options.summaryCache?.save(loaded.xmlHash, loaded.targetId, loaded.load.pobVersion, s);
+        } catch (error: unknown) {
+            this.options.logger.log('warn', 'build figures not cached', { error: messageOf(error) });
+        }
+    }
+
     private saveGear(buildId: string, items: readonly EquippedInfo[]): void {
         try {
             this.options.gearCache?.save(buildId, items);
         } catch (error: unknown) {
-            this.options.logger.log('warn', 'gear cache not saved', { error: error instanceof Error ? error.message : String(error) });
+            this.options.logger.log('warn', 'gear cache not saved', { error: messageOf(error) });
         }
     }
 
     private async selectLoaded(buildId: string, file: string, targetId: string): Promise<LoadedBuild> {
         const ticket: number = ++this.wanted;
+        let shown: BuildSummary | null = null;
         try {
             const loaded: LoadedBuild = await this.exclusive(async (client: EngineClient) => {
                 // Said only once the worker is ours: a reload waiting behind a run isn't "loading" all run long.
                 if (ticket === this.wanted) {
-                    this.options.onState({ kind: 'loading', buildId: buildId, equipped: this.cachedGear(buildId) });
+                    shown = this.cachedSummary(file, targetId);
+                    this.options.onState({ kind: 'loading', buildId: buildId, equipped: this.cachedGear(buildId), summary: shown });
                 }
                 return this.load(client, buildId, file, targetId);
             });
@@ -113,10 +179,11 @@ export class EngineSession {
                 this.current = loaded;
                 this.options.onState({ kind: 'ready', summary: loaded.summary });
                 this.saveGear(buildId, loaded.summary.equipped);
+                this.saveSummary(loaded, shown);
             }
             return loaded;
         } catch (error: unknown) {
-            const message: string = error instanceof Error ? error.message : String(error);
+            const message: string = messageOf(error);
             this.options.logger.log('warn', 'build load failed', { buildId: buildId, target: targetId, error: message });
             if (ticket === this.wanted) {
                 this.current = undefined;
@@ -167,14 +234,17 @@ export class EngineSession {
     private ensureClient(): EngineClient {
         if (this.client === undefined) {
             const command: EngineCommand = this.options.command();
-            this.client = this.options.createClient?.(command, this.options.logger) ?? new EngineClient({ command: command, logger: this.options.logger });
+            this.client =
+                this.options.createClient?.(command, this.options.logger) ??
+                new EngineClient({ command: command, logger: this.options.logger });
         }
         return this.client;
     }
 
     private async load(client: EngineClient, buildId: string, file: string, targetId: string): Promise<LoadedBuild> {
-        const fileModifiedMs: number = statSync(file).mtimeMs;
-        const xml: string = readFileSync(file, 'utf8').replace(/^﻿/, '');
+        const save: SaveFile = readSave(file);
+        const fileModifiedMs: number = save.modifiedMs;
+        const xml: string = save.xml;
         const started: number = Date.now();
         const load: WithWarnings<LoadBuildData> = await client.loadBuild(xml, basename(file));
         let target: ResolvedTarget = load.target;
@@ -186,17 +256,32 @@ export class EngineSession {
             stats = s.stats;
             warnings = [...warnings, ...s.warnings];
         }
-        this.options.logger.log('info', 'build loaded', { buildId: buildId, target: targetId, ms: Date.now() - started, pobVersion: load.pobVersion, damage: stats.damage });
+        this.options.logger.log('info', 'build loaded', {
+            buildId: buildId,
+            target: targetId,
+            ms: Date.now() - started,
+            pobVersion: load.pobVersion,
+            damage: stats.damage,
+        });
         return {
             buildId: buildId,
             file: file,
             targetId: targetId,
-            xmlHash: createHash('sha1').update(xml).digest('hex'),
+            xmlHash: save.xmlHash,
             fileModifiedMs: fileModifiedMs,
             load: load,
             target: target,
             stats: stats,
-            summary: buildSummary({ buildId: buildId, load: load, targetId: targetId, target: target, stats: stats, warnings: warnings, fileModifiedMs: fileModifiedMs, art: itemArt }),
+            summary: buildSummary({
+                buildId: buildId,
+                load: load,
+                targetId: targetId,
+                target: target,
+                stats: stats,
+                warnings: warnings,
+                fileModifiedMs: fileModifiedMs,
+                art: itemArt,
+            }),
         };
     }
 }

@@ -4,6 +4,7 @@
 import { watch } from 'node:fs';
 import type { FSWatcher } from 'node:fs';
 import type { Logger } from '@poe-upgrade-finder/logging';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const WATCH_DEBOUNCE_MS: number = 500;
 
@@ -42,7 +43,7 @@ export class BuildWatcher {
             });
             this.log.log('info', 'watching the builds folder', { dir: dir });
         } catch (error: unknown) {
-            this.log.log('warn', 'builds folder not watched', { dir: dir, error: error instanceof Error ? error.message : String(error) });
+            this.log.log('warn', 'builds folder not watched', { dir: dir, error: messageOf(error) });
         }
     }
 

@@ -65,7 +65,12 @@ function parseTriples(value: string | undefined): number[][] {
     }
     return value
         .split(',')
-        .map((part: string) => part.trim().split(':').map((n: string) => Number(n)))
+        .map((part: string) =>
+            part
+                .trim()
+                .split(':')
+                .map((n: string) => Number(n)),
+        )
         .filter((triple: number[]) => triple.length === 3 && triple.every((n: number) => Number.isFinite(n)));
 }
 
@@ -261,9 +266,13 @@ export class RateLimiter<K extends string = TradePolicy> {
                 // from the response whenever the server said full: 300 s stalls where 60 to 90 s were enough, 22 Nov.)
                 const serverValid: boolean = w.hits !== undefined && now < state.observedAt + periodMs;
                 if (serverValid && (w.hits ?? 0) >= allowed) {
-                    const knownAtObservation: number = times.filter((t: number) => t > state.observedAt - periodMs && t <= state.observedAt).length;
+                    const knownAtObservation: number = times.filter(
+                        (t: number) => t > state.observedAt - periodMs && t <= state.observedAt,
+                    ).length;
                     const unknown: number = Math.max(0, (w.hits ?? 0) - knownAtObservation);
-                    const merged: number[] = [...local, ...new Array<number>(unknown).fill(state.observedAt)].sort((a: number, b: number) => a - b);
+                    const merged: number[] = [...local, ...new Array<number>(unknown).fill(state.observedAt)].sort(
+                        (a: number, b: number) => a - b,
+                    );
                     const freeing: number | undefined = merged[merged.length - allowed];
                     if (merged.length >= allowed && freeing !== undefined) {
                         windowWait = Math.max(windowWait, freeing + periodMs - now);

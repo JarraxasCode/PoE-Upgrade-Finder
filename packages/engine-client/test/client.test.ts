@@ -10,11 +10,21 @@ function client(mode: string = 'normal', options: Partial<EngineClientOptions> =
     return new EngineClient({ command: { command: process.execPath, args: [fake, mode], env: {} }, startupTimeoutMs: 5000, ...options });
 }
 
-async function scoreAll(engine: EngineClient, items: readonly string[], batchSize: number, signal?: AbortSignal): Promise<{ results: ScoreItemResult[]; summary: ScoreSummary }> {
+async function scoreAll(
+    engine: EngineClient,
+    items: readonly string[],
+    batchSize: number,
+    signal?: AbortSignal,
+): Promise<{ results: ScoreItemResult[]; summary: ScoreSummary }> {
     const results: ScoreItemResult[] = [];
-    const summary: ScoreSummary = await engine.score('Boots', items, (r: ScoreItemResult) => {
-        results.push(r);
-    }, signal ? { batchSize: batchSize, signal: signal } : { batchSize: batchSize });
+    const summary: ScoreSummary = await engine.score(
+        'Boots',
+        items,
+        (r: ScoreItemResult) => {
+            results.push(r);
+        },
+        signal ? { batchSize: batchSize, signal: signal } : { batchSize: batchSize },
+    );
     return { results: results, summary: summary };
 }
 
@@ -41,7 +51,10 @@ test('engine errors keep their code and leave the worker running', async () => {
     const engine: EngineClient = client();
     try {
         await assert.rejects(engine.stats(), (e: unknown) => e instanceof EngineError && e.code === 'no-build');
-        await assert.rejects(engine.loadBuild('BROKEN'), (e: unknown) => e instanceof EngineError && e.code === 'load-failed' && !e.workerLost);
+        await assert.rejects(
+            engine.loadBuild('BROKEN'),
+            (e: unknown) => e instanceof EngineError && e.code === 'load-failed' && !e.workerLost,
+        );
         assert.equal(engine.loaded, undefined);
         await engine.loadBuild('<xml/>');
         await engine.stats();
@@ -56,13 +69,22 @@ test('score streams every item in order across batches', async () => {
     try {
         await engine.loadBuild('<xml/>');
         const { results, summary } = await scoreAll(engine, ['a', 'b', 'BAD', 'd', 'e'], 2);
-        assert.deepEqual(results.map((r: ScoreItemResult) => r.index), [0, 1, 2, 3, 4]);
-        assert.deepEqual(results.map((r: ScoreItemResult) => r.ok), [true, true, false, true, true]);
+        assert.deepEqual(
+            results.map((r: ScoreItemResult) => r.index),
+            [0, 1, 2, 3, 4],
+        );
+        assert.deepEqual(
+            results.map((r: ScoreItemResult) => r.ok),
+            [true, true, false, true, true],
+        );
         const fourth: ScoreItemResult | undefined = results[3];
         assert.ok(fourth?.ok);
         assert.equal(fourth.item.name, 'd');
         assert.equal(fourth.stats.damage, 101);
-        assert.deepEqual({ ...summary, seconds: 0 }, { count: 5, scored: 4, failed: 1, skipped: 0, cancelled: false, restarts: 0, seconds: 0 });
+        assert.deepEqual(
+            { ...summary, seconds: 0 },
+            { count: 5, scored: 4, failed: 1, skipped: 0, cancelled: false, restarts: 0, seconds: 0 },
+        );
     } finally {
         await engine.shutdown();
     }
@@ -73,7 +95,15 @@ test('a crash fails the item in flight, restarts with the build and carries on',
     try {
         const first = await engine.loadBuild('<xml/>');
         const { results, summary } = await scoreAll(engine, ['a', 'CRASH', 'c', 'd'], 4);
-        assert.deepEqual(results.map((r: ScoreItemResult) => [r.index, r.ok]), [[0, true], [1, false], [2, true], [3, true]]);
+        assert.deepEqual(
+            results.map((r: ScoreItemResult) => [r.index, r.ok]),
+            [
+                [0, true],
+                [1, false],
+                [2, true],
+                [3, true],
+            ],
+        );
         const lost: ScoreItemResult | undefined = results[1];
         assert.ok(lost && !lost.ok);
         assert.equal(lost.error.code, 'worker-exited');
@@ -91,7 +121,14 @@ test('a crash after the last item of a batch fails no item, and the next batch i
     try {
         await engine.loadBuild('<xml/>');
         const { results, summary } = await scoreAll(engine, ['a', 'SCORE-THEN-CRASH', 'c'], 2);
-        assert.deepEqual(results.map((r: ScoreItemResult) => [r.index, r.ok]), [[0, true], [1, true], [2, true]]);
+        assert.deepEqual(
+            results.map((r: ScoreItemResult) => [r.index, r.ok]),
+            [
+                [0, true],
+                [1, true],
+                [2, true],
+            ],
+        );
         assert.equal(summary.failed, 0);
         assert.equal(summary.skipped, 0);
         assert.equal(summary.restarts, 1);
@@ -105,7 +142,14 @@ test('a hang times out, fails that item and carries on', async () => {
     try {
         await engine.loadBuild('<xml/>');
         const { results, summary } = await scoreAll(engine, ['a', 'HANG', 'c'], 10);
-        assert.deepEqual(results.map((r: ScoreItemResult) => [r.index, r.ok]), [[0, true], [1, false], [2, true]]);
+        assert.deepEqual(
+            results.map((r: ScoreItemResult) => [r.index, r.ok]),
+            [
+                [0, true],
+                [1, false],
+                [2, true],
+            ],
+        );
         const lost: ScoreItemResult | undefined = results[1];
         assert.ok(lost && !lost.ok);
         assert.equal(lost.error.code, 'timeout');
@@ -119,7 +163,10 @@ test('too many restarts stop the run', async () => {
     const engine: EngineClient = client('normal', { maxRestartsPerScore: 1 });
     try {
         await engine.loadBuild('<xml/>');
-        await assert.rejects(scoreAll(engine, ['CRASH', 'CRASH', 'c'], 10), (e: unknown) => e instanceof EngineError && e.code === 'worker-exited');
+        await assert.rejects(
+            scoreAll(engine, ['CRASH', 'CRASH', 'c'], 10),
+            (e: unknown) => e instanceof EngineError && e.code === 'worker-exited',
+        );
     } finally {
         await engine.shutdown();
     }
@@ -131,10 +178,15 @@ test('cancel takes effect between batches', async () => {
         await engine.loadBuild('<xml/>');
         const controller: AbortController = new AbortController();
         const results: ScoreItemResult[] = [];
-        const summary: ScoreSummary = await engine.score('Boots', ['a', 'b', 'c', 'd', 'e'], (r: ScoreItemResult) => {
-            results.push(r);
-            controller.abort();
-        }, { batchSize: 2, signal: controller.signal });
+        const summary: ScoreSummary = await engine.score(
+            'Boots',
+            ['a', 'b', 'c', 'd', 'e'],
+            (r: ScoreItemResult) => {
+                results.push(r);
+                controller.abort();
+            },
+            { batchSize: 2, signal: controller.signal },
+        );
         assert.equal(results.length, 2);
         assert.equal(summary.cancelled, true);
         assert.equal(summary.skipped, 3);
@@ -144,9 +196,15 @@ test('cancel takes effect between batches', async () => {
 });
 
 test('startup failures are reported', async () => {
-    await assert.rejects(client('fatal').start(), (e: unknown) => e instanceof EngineError && e.code === 'startup-failed' && /no PoB here/.test(e.message));
+    await assert.rejects(
+        client('fatal').start(),
+        (e: unknown) => e instanceof EngineError && e.code === 'startup-failed' && /no PoB here/.test(e.message),
+    );
     const silent: EngineClient = client('silent', { startupTimeoutMs: 300 });
-    await assert.rejects(silent.start(), (e: unknown) => e instanceof EngineError && e.code === 'startup-failed' && /Loading passive|no ready event/.test(e.message));
+    await assert.rejects(
+        silent.start(),
+        (e: unknown) => e instanceof EngineError && e.code === 'startup-failed' && /Loading passive|no ready event/.test(e.message),
+    );
     await assert.rejects(client('bad-json').start(), (e: unknown) => e instanceof EngineError && e.code === 'protocol');
     const missing: EngineClient = new EngineClient({ command: { command: 'C:/no/such/engine.exe', args: [], env: {} } });
     await assert.rejects(missing.start(), (e: unknown) => e instanceof EngineError && e.code === 'startup-failed');

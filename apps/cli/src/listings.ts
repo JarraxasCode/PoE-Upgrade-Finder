@@ -4,6 +4,8 @@
 
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
+import type { JsonRecord } from '@poe-upgrade-finder/validate';
+import { isRecord } from '@poe-upgrade-finder/validate';
 
 export interface Price {
     readonly amount: number;
@@ -23,11 +25,7 @@ export interface Listing {
     readonly source: string;
 }
 
-type Json = Readonly<Record<string, unknown>>;
-
-function isRecord(value: unknown): value is Json {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
+type Json = JsonRecord;
 
 export function rarityOf(text: string): string | undefined {
     const match: RegExpMatchArray | null = /^Rarity: (\w+)/m.exec(text);

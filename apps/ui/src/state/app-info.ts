@@ -5,6 +5,7 @@ import type { Signal } from '@preact/signals';
 import type { AppInfo, PobUpdateState } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import type { Loadable } from './loadable.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const appInfo: Signal<Loadable<AppInfo>> = signal<Loadable<AppInfo>>({ kind: 'loading' });
 export const pobUpdate: Signal<PobUpdateState | null> = signal<PobUpdateState | null>(null);
@@ -13,7 +14,7 @@ export async function loadAppInfo(): Promise<void> {
     try {
         appInfo.value = { kind: 'ready', value: await call('app.info', {}) };
     } catch (error: unknown) {
-        appInfo.value = { kind: 'error', message: error instanceof Error ? error.message : String(error) };
+        appInfo.value = { kind: 'error', message: messageOf(error) };
     }
     try {
         pobUpdate.value = await call('pob.status', {});

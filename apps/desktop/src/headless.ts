@@ -7,7 +7,15 @@ import { basename, join } from 'node:path';
 import { session } from 'electron';
 import { UsageError } from '@poe-upgrade-finder/cli/args';
 import {
-    bandSearches, compileQuery, DEFAULT_FLOORS, generatorWeights, priceBands, readFloorSettings, runSlotSearch, saveSpec, v1SpecBuilder,
+    bandSearches,
+    compileQuery,
+    DEFAULT_FLOORS,
+    generatorWeights,
+    priceBands,
+    readFloorSettings,
+    runSlotSearch,
+    saveSpec,
+    v1SpecBuilder,
 } from '@poe-upgrade-finder/core';
 import type { BandSearch, CompiledQuery, FloorSettings, PriceBand, RunEvent, RunResult, SlotSearchSpec } from '@poe-upgrade-finder/core';
 import { EngineClient, luahostCommand, resolveEnginePaths } from '@poe-upgrade-finder/engine-client';
@@ -24,6 +32,7 @@ import { liveLine, summaryText } from './report.ts';
 import { engineAdapter, pruneRuns, writeRunRecord } from './run/shared.ts';
 import { openSignInWindow, probeSignIn, TRADE_PARTITION } from './signin.ts';
 import type { SignInState } from './signin.ts';
+import { stackOf } from '@poe-upgrade-finder/validate';
 
 function say(text: string): void {
     process.stdout.write(`${text}\n`);
@@ -47,7 +56,10 @@ async function prepareEngine(opts: HeadlessOptions, xml: string, log: Logger): P
     const build: WithWarnings<LoadBuildData> = await engine.loadBuild(xml, basename(opts.build));
     const baseline: WithWarnings<StatsData> = await engine.stats({ target: opts.target });
     const stripped: WithWarnings<StripData> = await engine.strip(opts.slot, { target: opts.target });
-    const query: WithWarnings<TradeQueryData> = await engine.tradeQuery(opts.slot, { target: opts.target, ...generatorWeights(opts.blend) });
+    const query: WithWarnings<TradeQueryData> = await engine.tradeQuery(opts.slot, {
+        target: opts.target,
+        ...generatorWeights(opts.blend),
+    });
     return { engine: engine, build: build, baseline: baseline, stripped: stripped, query: query };
 }
 
@@ -70,10 +82,24 @@ export async function runHeadless(argv: readonly string[], userData: string, app
     const runsDir: string = join(userData, 'runs');
     mkdirSync(runsDir, { recursive: true });
 
-    const floors: FloorSettings = opts.floorsFile === undefined ? DEFAULT_FLOORS : readFloorSettings(JSON.parse(readFileSync(opts.floorsFile, 'utf8')));
+    const floors: FloorSettings =
+        opts.floorsFile === undefined ? DEFAULT_FLOORS : readFloorSettings(JSON.parse(readFileSync(opts.floorsFile, 'utf8')));
     const xml: string = readFileSync(opts.build, 'utf8').replace(/^﻿/, '');
-    runLog.log('info', 'headless run starting', { runId: runId, slot: opts.slot, league: opts.league, budget: opts.budget, depth: opts.depth, blend: opts.blend, target: opts.target, listing: opts.listing, floors: floors, build: basename(opts.build) });
-    say(`poe-upgrade-finder ${appVersion}: ${opts.slot} on ${basename(opts.build)}, ${opts.league}, ${opts.depth} (${opts.perBand} per band)`);
+    runLog.log('info', 'headless run starting', {
+        runId: runId,
+        slot: opts.slot,
+        league: opts.league,
+        budget: opts.budget,
+        depth: opts.depth,
+        blend: opts.blend,
+        target: opts.target,
+        listing: opts.listing,
+        floors: floors,
+        build: basename(opts.build),
+    });
+    say(
+        `poe-upgrade-finder ${appVersion}: ${opts.slot} on ${basename(opts.build)}, ${opts.league}, ${opts.depth} (${opts.perBand} per band)`,
+    );
 
     // PoB first, in the background: it takes a few seconds and needs no network.
     const enginePrep: Promise<Prepared> = prepareEngine(opts, xml, logger.area('engine'));
@@ -105,16 +131,26 @@ export async function runHeadless(argv: readonly string[], userData: string, app
         transport: electronTransport(tradeSession),
         limiter: limiter,
         logger: logger.area('trade'),
-        ...(opts.record ? { onResponse: (r: RecordedResponse): void => { recorded.push({ ...r, json: stripTokens(r.json) }); } } : {}),
+        ...(opts.record
+            ? {
+                  onResponse: (r: RecordedResponse): void => {
+                      recorded.push({ ...r, json: stripTokens(r.json) });
+                  },
+              }
+            : {}),
     });
 
     let prepared: Prepared | undefined;
     try {
         let state: SignInState = opts.dryRun ? 'signed-in' : await probeSignIn(client, opts.league);
         if (state !== 'signed-in') {
-            say(state === 'cloudflare' ? 'Cloudflare wants a check: a pathofexile.com window is opening.' : 'Not signed in: a pathofexile.com sign-in window is opening.');
+            say(
+                state === 'cloudflare'
+                    ? 'Cloudflare wants a check: a pathofexile.com window is opening.'
+                    : 'Not signed in: a pathofexile.com sign-in window is opening.',
+            );
             say('Sign in there (tick "Remember me"). The window closes by itself once you reach My Account.');
-            say('If you don\'t see it, look for it on the taskbar (it flashes).');
+            say("If you don't see it, look for it on the taskbar (it flashes).");
             await openSignInWindow(logger.area('signin'));
             state = await probeSignIn(client, opts.league);
             if (state !== 'signed-in') {
@@ -126,14 +162,20 @@ export async function runHeadless(argv: readonly string[], userData: string, app
         say(opts.dryRun ? 'Dry run: no trade calls.' : 'Signed in to pathofexile.com.');
 
         const cache: CacheDb = new CacheDb(join(userData, 'cache.sqlite'));
-        const rates: DivineRateClient = new DivineRateClient({ transport: nodeFetchTransport, logger: logger.area('rate'), appVersion: appVersion, store: cache.rateStore() });
+        const rates: DivineRateClient = new DivineRateClient({
+            transport: nodeFetchTransport,
+            logger: logger.area('rate'),
+            appVersion: appVersion,
+            store: cache.rateStore(),
+        });
         let chaosPerDivine: number | undefined = opts.rate;
         let rateText: string = opts.rate === undefined ? 'unknown' : `${opts.rate}c (typed in)`;
         if (opts.rate === undefined && !opts.dryRun) {
             const lookup: RateLookup = await rates.current(opts.league);
             chaosPerDivine = lookup.rate?.chaosPerDivine;
             if (lookup.rate !== undefined) {
-                const hour: string = lookup.rate.hour === undefined ? '' : `, hour of ${new Date(lookup.rate.hour * 1000).toISOString().slice(11, 16)} UTC`;
+                const hour: string =
+                    lookup.rate.hour === undefined ? '' : `, hour of ${new Date(lookup.rate.hour * 1000).toISOString().slice(11, 16)} UTC`;
                 rateText = `${lookup.rate.chaosPerDivine.toFixed(1)}c (${lookup.rate.source === 'ggg' ? 'GGG exchange' : 'typed in'}${hour})`;
             } else {
                 say('No divine rate from GGG; pass --rate <chaos per divine> to include divine-priced listings.');
@@ -145,16 +187,21 @@ export async function runHeadless(argv: readonly string[], userData: string, app
             return 64;
         }
         const budgetChaos: number = opts.budget.unit === 'chaos' ? opts.budget.amount : opts.budget.amount * (chaosPerDivine ?? 0);
-        const budgetText: string = opts.budget.unit === 'chaos' ? `${budgetChaos}c` : `${opts.budget.amount}d ≈ ${Math.round(budgetChaos)}c`;
+        const budgetText: string =
+            opts.budget.unit === 'chaos' ? `${budgetChaos}c` : `${opts.budget.amount}d ≈ ${Math.round(budgetChaos)}c`;
 
         say('Waiting for PoB (load, strip, trade query)...');
         prepared = await enginePrep;
         const b = prepared.baseline.stats;
         if (!(b.damage > 0)) {
-            say('The damage target reads 0 (the saved main skill does no damage). Pick one with --target skill:G.A, as the CLI\'s info command lists.');
+            say(
+                "The damage target reads 0 (the saved main skill does no damage). Pick one with --target skill:G.A, as the CLI's info command lists.",
+            );
             return 64;
         }
-        say(`PoB ${prepared.build.pobVersion}: damage ${Math.round(b.damage).toLocaleString('en-GB')}, EHP ${Math.round(Number(b.values['TotalEHP'] ?? 0)).toLocaleString('en-GB')}, life ${b.values['Life'] ?? '?'}; current ${opts.slot}: ${prepared.query.item.name || prepared.query.item.base}`);
+        say(
+            `PoB ${prepared.build.pobVersion}: damage ${Math.round(b.damage).toLocaleString('en-GB')}, EHP ${Math.round(Number(b.values['TotalEHP'] ?? 0)).toLocaleString('en-GB')}, life ${b.values['Life'] ?? '?'}; current ${opts.slot}: ${prepared.query.item.name || prepared.query.item.base}`,
+        );
 
         const bands: PriceBand[] = priceBands(budgetChaos);
         const spec: SlotSearchSpec = v1SpecBuilder().build({
@@ -167,13 +214,19 @@ export async function runHeadless(argv: readonly string[], userData: string, app
             pobQuery: prepared.query,
             floors: floors,
         });
-        say(`Search: ${spec.category}, ${spec.weights.length} weighted stats from PoB's generator, ${spec.requirements.length} hard needs${spec.requirements.length > 0 ? `: ${spec.requirements.map((r) => r.label.replace(/^Required: /, '').replace(/, from strip$/, '')).join(', ')}` : ''}`);
+        say(
+            `Search: ${spec.category}, ${spec.weights.length} weighted stats from PoB's generator, ${spec.requirements.length} hard needs${spec.requirements.length > 0 ? `: ${spec.requirements.map((r) => r.label.replace(/^Required: /, '').replace(/, from strip$/, '')).join(', ')}` : ''}`,
+        );
         say(`Bands: ${bands.map((x: PriceBand) => x.label).join(' | ')}`);
 
         if (opts.dryRun) {
-            const queries: CompiledQuery[] = bands.flatMap((band: PriceBand) => bandSearches(band, chaosPerDivine).map((s: BandSearch) => compileQuery(spec, s)));
+            const queries: CompiledQuery[] = bands.flatMap((band: PriceBand) =>
+                bandSearches(band, chaosPerDivine).map((s: BandSearch) => compileQuery(spec, s)),
+            );
             for (const q of queries) {
-                say(`  ${bands.find((x: PriceBand) => x.id === q.bandId)?.label ?? q.bandId}, ${q.option}: complexity ${q.complexity} (${q.weightsUsed} weighted + ${spec.requirements.length} required${q.dropped.length > 0 ? `, ${q.dropped.length} dropped` : ''})`);
+                say(
+                    `  ${bands.find((x: PriceBand) => x.id === q.bandId)?.label ?? q.bandId}, ${q.option}: complexity ${q.complexity} (${q.weightsUsed} weighted + ${spec.requirements.length} required${q.dropped.length > 0 ? `, ${q.dropped.length} dropped` : ''})`,
+                );
             }
             say('Weights (PoB order):');
             for (const w of spec.weights) {
@@ -187,21 +240,36 @@ export async function runHeadless(argv: readonly string[], userData: string, app
 
         const minGain: number = opts.minGainPct;
         const result: RunResult = await runSlotSearch(
-            { league: opts.league, spec: spec, baseline: b, blend: opts.blend, depth: opts.perBand, chaosPerDivine: chaosPerDivine, value: { minGainPct: minGain } },
+            {
+                league: opts.league,
+                spec: spec,
+                baseline: b,
+                blend: opts.blend,
+                depth: opts.perBand,
+                chaosPerDivine: chaosPerDivine,
+                value: { minGainPct: minGain },
+            },
             client,
             engineAdapter(prepared.engine, opts.slot, opts.target),
             (event: RunEvent): void => {
                 if (event.kind === 'search') {
                     const s = event.record;
                     const band: string = bands.find((x: PriceBand) => x.id === s.bandId)?.label ?? s.bandId;
-                    say(`${band}, ${s.option}: ${s.error === undefined ? `${s.total ?? 0} listings, fetching ${s.fetchPlanned}` : `refused: ${s.error}`}`);
+                    say(
+                        `${band}, ${s.option}: ${s.error === undefined ? `${s.total ?? 0} listings, fetching ${s.fetchPlanned}` : `refused: ${s.error}`}`,
+                    );
                     runLog.log('info', 'search', { ...s, body: undefined, idList: undefined });
                 } else if (event.kind === 'item') {
                     const line: string | undefined = liveLine(event.item, minGain);
                     if (line !== undefined) {
                         say(line);
                     }
-                    runLog.log('debug', 'scored', { id: event.item.item.id, gain: event.item.gain, floorsPass: event.item.floorsPass, price: event.item.item.price ?? null });
+                    runLog.log('debug', 'scored', {
+                        id: event.item.item.id,
+                        gain: event.item.gain,
+                        floorsPass: event.item.floorsPass,
+                        price: event.item.item.price ?? null,
+                    });
                 } else if (event.kind === 'warning') {
                     say(`  warning: ${event.message}`);
                     runLog.log('warn', event.message);
@@ -217,7 +285,16 @@ export async function runHeadless(argv: readonly string[], userData: string, app
             },
         );
 
-        const summary: string = summaryText({ league: opts.league, slot: opts.slot, budgetText: budgetText, rateText: rateText, bands: bands, result: result, minGainPct: minGain, top: 15 });
+        const summary: string = summaryText({
+            league: opts.league,
+            slot: opts.slot,
+            budgetText: budgetText,
+            rateText: rateText,
+            bands: bands,
+            result: result,
+            minGainPct: minGain,
+            top: 15,
+        });
         say('');
         process.stdout.write(summary);
         const finished: number = Date.now();
@@ -243,17 +320,29 @@ export async function runHeadless(argv: readonly string[], userData: string, app
         if (opts.record) {
             writeFileSync(join(runsDir, `${runId}-raw.json`), JSON.stringify(recorded));
         }
-        say(`\nSaved: ${join(runsDir, `${runId}.json`)} (and .txt${opts.record ? ', -raw.json' : ''}); log ${join(userData, 'logs', 'runs', `${runId}.jsonl`)}`);
+        say(
+            `\nSaved: ${join(runsDir, `${runId}.json`)} (and .txt${opts.record ? ', -raw.json' : ''}); log ${join(userData, 'logs', 'runs', `${runId}.jsonl`)}`,
+        );
         pruneRuns(runsDir);
-        runLog.log('info', 'headless run done', { seconds: (finished - started) / 1000, counts: result.counts, verdict: verdict.note, stoppedReason: result.stoppedReason ?? null });
+        runLog.log('info', 'headless run done', {
+            seconds: (finished - started) / 1000,
+            counts: result.counts,
+            verdict: verdict.note,
+            stoppedReason: result.stoppedReason ?? null,
+        });
         return result.stoppedReason === undefined ? 0 : 3;
     } catch (error: unknown) {
         const message: string = error instanceof Error ? `${error.name}: ${error.message}` : String(error);
         say(`Failed: ${message}`);
-        runLog.log('error', 'headless run failed', { error: message, stack: error instanceof Error ? error.stack ?? null : null });
+        runLog.log('error', 'headless run failed', { error: message, stack: stackOf(error) });
         return 1;
     } finally {
-        const engine: EngineClient | undefined = prepared?.engine ?? (await enginePrep.then((p: Prepared) => p.engine, () => undefined));
+        const engine: EngineClient | undefined =
+            prepared?.engine ??
+            (await enginePrep.then(
+                (p: Prepared) => p.engine,
+                () => undefined,
+            ));
         await engine?.shutdown().catch(() => undefined);
         logger.endRun();
     }

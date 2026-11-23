@@ -62,7 +62,9 @@ export class ScriptedTransport implements HttpTransport {
     private readonly script: ((request: HttpRequest) => HttpOutcome)[];
 
     public constructor(script: readonly (HttpOutcome | ((request: HttpRequest) => HttpOutcome))[]) {
-        this.script = script.map((s: HttpOutcome | ((request: HttpRequest) => HttpOutcome)) => (typeof s === 'function' ? s : (): HttpOutcome => s));
+        this.script = script.map((s: HttpOutcome | ((request: HttpRequest) => HttpOutcome)) =>
+            typeof s === 'function' ? s : (): HttpOutcome => s,
+        );
     }
 
     public send(request: HttpRequest): Promise<HttpOutcome> {
@@ -100,7 +102,31 @@ export function encodedItemText(note: string = '~b/o 115 chaos'): string {
 export function listingJson(id: string, amount: number, currency: string, seller: string = 'SellerA'): unknown {
     return {
         id: id,
-        listing: { method: 'psapi', indexed: '2026-11-21T10:00:00Z', price: { type: '~b/o', amount: amount, currency: currency }, account: { name: seller, online: null }, whisper_token: 'secret' },
-        item: { name: 'Gloom Spark', typeLine: 'Sorcerer Boots', baseType: 'Sorcerer Boots', rarity: 'Rare', ilvl: 84, identified: true, extended: { text: encodedItemText(), hashes: { explicit: [['explicit.stat_3299347043', [0]], ['explicit.stat_2923486259', [1]]], implicit: [['implicit.stat_1', [0]]], crafted: [['crafted.stat_2250533757', [0]]] } } },
+        listing: {
+            method: 'psapi',
+            indexed: '2026-11-21T10:00:00Z',
+            price: { type: '~b/o', amount: amount, currency: currency },
+            account: { name: seller, online: null },
+            whisper_token: 'secret',
+        },
+        item: {
+            name: 'Gloom Spark',
+            typeLine: 'Sorcerer Boots',
+            baseType: 'Sorcerer Boots',
+            rarity: 'Rare',
+            ilvl: 84,
+            identified: true,
+            extended: {
+                text: encodedItemText(),
+                hashes: {
+                    explicit: [
+                        ['explicit.stat_3299347043', [0]],
+                        ['explicit.stat_2923486259', [1]],
+                    ],
+                    implicit: [['implicit.stat_1', [0]]],
+                    crafted: [['crafted.stat_2250533757', [0]]],
+                },
+            },
+        },
     };
 }

@@ -24,16 +24,27 @@ function hidden(rows: readonly FilteredItem[]): Record<string, string> {
 
 test('evaluateItem runs the checks and the gain on PoB numbers', () => {
     const spec = v1SpecBuilder().build({
-        slot: 'Boots', listingType: 'securable', priceBands: priceBands(300), characterLevel: 94,
-        baseline: baseStats(), stripped: baseStats(),
-        pobQuery: { category: { query: 'armour.boots' }, query: { stats: [] } }, floors: DEFAULT_FLOORS,
+        slot: 'Boots',
+        listingType: 'securable',
+        priceBands: priceBands(300),
+        characterLevel: 94,
+        baseline: baseStats(),
+        stripped: baseStats(),
+        pobQuery: { category: { query: 'armour.boots' }, query: { stats: [] } },
+        floors: DEFAULT_FLOORS,
     });
     const after = { damage: 1_020_000, values: { ...baseStats().values, TotalEHP: 101_000, ChaosResist: 45 } };
     const e: EvaluatedItem = evaluateItem(spec, baseStats(), listed('a', 10), { stats: after, unparsed: [] }, 0.5);
     assert.ok(Math.abs(e.gain.gain - 1.5) < 1e-9, `gain ${e.gain.gain}`);
     assert.equal(e.floorsPass, false);
-    assert.deepEqual(e.failedFloors.map((c) => c.checkId), ['chaos-res']);
-    assert.deepEqual(e.missedTargets.map((c) => c.checkId), ['target-chaos-res', 'target-max-res-fire']);
+    assert.deepEqual(
+        e.failedFloors.map((c) => c.checkId),
+        ['chaos-res'],
+    );
+    assert.deepEqual(
+        e.missedTargets.map((c) => c.checkId),
+        ['target-chaos-res', 'target-max-res-fire'],
+    );
 });
 
 test('junk filter: floors, missing gain, low gain, duplicates by one seller, dominated', () => {
@@ -49,8 +60,15 @@ test('junk filter: floors, missing gain, low gain, duplicates by one seller, dom
         evaluated(listed('exalt', undefined), 2),
     ]);
     assert.deepEqual(hidden(rows), {
-        floor: 'floor', nan: 'no-gain', low: 'low-gain', cheap: 'shown', 'dear-dup': 'duplicate', 'cheap-dup': 'shown',
-        dominated: 'dominated', best: 'shown', exalt: 'shown',
+        floor: 'floor',
+        nan: 'no-gain',
+        low: 'low-gain',
+        cheap: 'shown',
+        'dear-dup': 'duplicate',
+        'cheap-dup': 'shown',
+        dominated: 'dominated',
+        best: 'shown',
+        exalt: 'shown',
     });
     assert.equal(rows.find((r: FilteredItem) => r.evaluated.item.id === 'dominated')?.hiddenBy, 'cheap-dup');
     assert.equal(rows.find((r: FilteredItem) => r.evaluated.item.id === 'dear-dup')?.hiddenBy, 'cheap-dup');
@@ -70,11 +88,18 @@ test('value rule: the cheapest item with at least 80% of the best gain', () => {
     assert.equal(v.pick.item.id, 'eighty');
     assert.equal(v.best.item.id, 'best');
     assert.match(v.note, /at least 80% of the best/);
-    assert.deepEqual(v.overBudget.map((e: EvaluatedItem) => e.item.id), ['over'], 'over budget is noted, never picked');
+    assert.deepEqual(
+        v.overBudget.map((e: EvaluatedItem) => e.item.id),
+        ['over'],
+        'over budget is noted, never picked',
+    );
 });
 
 test('value rule: ties on price go to the higher gain; a lone best is its own pick', () => {
-    const tie: Verdict = valuePick(junkFilter([evaluated(listed('a', 10), 9), evaluated(listed('b', 10), 9.5), evaluated(listed('top', 30), 10)]), BANDS);
+    const tie: Verdict = valuePick(
+        junkFilter([evaluated(listed('a', 10), 9), evaluated(listed('b', 10), 9.5), evaluated(listed('top', 30), 10)]),
+        BANDS,
+    );
     assert.ok(tie.kind === 'pick' && tie.pick.item.id === 'b');
     const lone: Verdict = valuePick(junkFilter([evaluated(listed('only', 10), 3)]), BANDS);
     assert.ok(lone.kind === 'pick' && lone.pick.item.id === 'only' && /the best in budget/.test(lone.note));

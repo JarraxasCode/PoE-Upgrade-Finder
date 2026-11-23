@@ -5,7 +5,7 @@ import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
 import type { RateState, SignInState } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
-import { messageOf } from './loadable.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const signIn: Signal<SignInState> = signal<SignInState>({ status: 'unknown', message: null, checkedAtMs: null });
 export const rate: Signal<RateState | null> = signal<RateState | null>(null);
@@ -32,21 +32,30 @@ async function run<T>(action: () => Promise<T>, apply: (value: T) => void): Prom
 }
 
 export function openSignIn(): Promise<void> {
-    return run(() => call('signin.open', {}), (s: SignInState) => {
-        signIn.value = s;
-    });
+    return run(
+        () => call('signin.open', {}),
+        (s: SignInState) => {
+            signIn.value = s;
+        },
+    );
 }
 
 export function checkSignIn(): Promise<void> {
-    return run(() => call('signin.check', {}), (s: SignInState) => {
-        signIn.value = s;
-    });
+    return run(
+        () => call('signin.check', {}),
+        (s: SignInState) => {
+            signIn.value = s;
+        },
+    );
 }
 
 export function signOut(): Promise<void> {
-    return run(() => call('signin.signOut', {}), (s: SignInState) => {
-        signIn.value = s;
-    });
+    return run(
+        () => call('signin.signOut', {}),
+        (s: SignInState) => {
+            signIn.value = s;
+        },
+    );
 }
 
 const setRate = (r: RateState): void => {

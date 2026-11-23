@@ -4,13 +4,25 @@
 import { array, boolean, isRecord, number, oneOf, optional, ProtocolError, record, string } from './check.ts';
 import type { JsonRecord } from './check.ts';
 import { isEngineNumber, isEngineValue, toNumber } from './values.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 // Requests ----------------------------------------------------------------------------------------------
 
 /** The rare gear slots v1 searches. The engine accepts any PoB item slot; the app only uses these. */
 export type GearSlot = 'Helmet' | 'Body Armour' | 'Gloves' | 'Boots' | 'Amulet' | 'Ring 1' | 'Ring 2' | 'Belt' | 'Weapon 1' | 'Weapon 2';
 
-export const GEAR_SLOTS: readonly GearSlot[] = ['Helmet', 'Body Armour', 'Gloves', 'Boots', 'Amulet', 'Ring 1', 'Ring 2', 'Belt', 'Weapon 1', 'Weapon 2'];
+export const GEAR_SLOTS: readonly GearSlot[] = [
+    'Helmet',
+    'Body Armour',
+    'Gloves',
+    'Boots',
+    'Amulet',
+    'Ring 1',
+    'Ring 2',
+    'Belt',
+    'Weapon 1',
+    'Weapon 2',
+];
 
 export function isGearSlot(value: string): value is GearSlot {
     return GEAR_SLOTS.some((s: GearSlot) => s === value);
@@ -22,7 +34,7 @@ export type TargetRequest =
     | { readonly kind: 'fullDps' }
     | { readonly kind: 'skill'; readonly group: number; readonly activeSkill: number; readonly part?: number };
 
-export type CommandName = 'ping' | 'loadBuild' | 'stats' | 'strip' | 'tradeQuery' | 'score' | 'shutdown';
+export type CommandName = 'ping' | 'loadBuild' | 'stats' | 'strip' | 'tradeQuery' | 'score' | 'baseTypes' | 'slotData' | 'shutdown';
 
 // Messages ----------------------------------------------------------------------------------------------
 
@@ -80,13 +92,17 @@ export function parseMessage(line: string): EngineMessage {
     try {
         value = JSON.parse(line);
     } catch (error: unknown) {
-        throw new ProtocolError(`not JSON: ${error instanceof Error ? error.message : String(error)}`);
+        throw new ProtocolError(`not JSON: ${messageOf(error)}`);
     }
     const m: JsonRecord = record(value, 'message');
     const event: unknown = m['event'];
     if (event === 'ready') {
         const data: JsonRecord = record(m['data'], 'ready.data');
-        return { type: 'ready', pobVersion: string(data['pobVersion'], 'ready.data.pobVersion'), gcEvery: number(data['gcEvery'], 'ready.data.gcEvery') };
+        return {
+            type: 'ready',
+            pobVersion: string(data['pobVersion'], 'ready.data.pobVersion'),
+            gcEvery: number(data['gcEvery'], 'ready.data.gcEvery'),
+        };
     }
     if (event === 'fatal') {
         return { type: 'fatal', error: readErrorInfo(m['error'], 'fatal.error') };
@@ -126,7 +142,14 @@ export interface StatBlock {
 
 export type ResolvedTarget =
     | { readonly kind: 'fullDps'; readonly saved: boolean }
-    | { readonly kind: 'skill'; readonly saved: boolean; readonly group: number; readonly activeSkill: number; readonly part: number | undefined; readonly name: string };
+    | {
+          readonly kind: 'skill';
+          readonly saved: boolean;
+          readonly group: number;
+          readonly activeSkill: number;
+          readonly part: number | undefined;
+          readonly name: string;
+      };
 
 export interface ActiveSkillInfo {
     readonly index: number;
@@ -150,6 +173,8 @@ export interface ItemInfo {
     readonly name: string;
     readonly base: string;
     readonly rarity: string;
+    /** PoB's item type ("Boots", "One Handed Sword"): the slot data's key. Undefined when PoB has no base for it. */
+    readonly type: string | undefined;
 }
 
 export interface EquippedItem extends ItemInfo {
@@ -264,7 +289,14 @@ export interface TradeQueryProgress {
 }
 
 export type ScoreItemResult =
-    | { readonly index: number; readonly ok: true; readonly item: ItemInfo; readonly stats: StatBlock; readonly unparsed: readonly string[]; readonly validForSlot: boolean }
+    | {
+          readonly index: number;
+          readonly ok: true;
+          readonly item: ItemInfo;
+          readonly stats: StatBlock;
+          readonly unparsed: readonly string[];
+          readonly validForSlot: boolean;
+      }
     | { readonly index: number; readonly ok: false; readonly error: EngineErrorInfo };
 
 export interface ScoreBatchSummary {
@@ -348,7 +380,13 @@ export function readTarget(value: unknown, path: string): ResolvedTarget {
 
 function readItemInfo(value: unknown, path: string): ItemInfo {
     const r: JsonRecord = record(value, path);
-    return { name: string(r['name'], `${path}.name`), base: string(r['base'], `${path}.base`), rarity: string(r['rarity'], `${path}.rarity`) };
+    return {
+        name: string(r['name'], `${path}.name`),
+        base: string(r['base'], `${path}.base`),
+        rarity: string(r['rarity'], `${path}.rarity`),
+        // Cached generator results from before the field have none.
+        type: r['type'] === undefined || r['type'] === null ? undefined : string(r['type'], `${path}.type`),
+    };
 }
 
 function readViewPart(value: unknown, path: string): PobViewPart {
@@ -407,7 +445,12 @@ function optionalView(value: unknown, path: string): PobItemView | undefined {
 
 function readEquipped(value: unknown, path: string): EquippedItem {
     const r: JsonRecord = record(value, path);
-    return { ...readItemInfo(r, path), slot: string(r['slot'], `${path}.slot`), text: string(r['text'], `${path}.text`), view: optionalView(r['view'], `${path}.view`) };
+    return {
+        ...readItemInfo(r, path),
+        slot: string(r['slot'], `${path}.slot`),
+        text: string(r['text'], `${path}.text`),
+        view: optionalView(r['view'], `${path}.view`),
+    };
 }
 
 function readActiveSkill(value: unknown, path: string): ActiveSkillInfo {
@@ -462,7 +505,11 @@ export function readStats(value: unknown): StatsData {
 
 export function readStrip(value: unknown): StripData {
     const r: JsonRecord = record(value, 'strip');
-    return { target: readTarget(r['target'], 'strip.target'), stats: readStatBlock(r['stats'], 'strip.stats'), slot: string(r['slot'], 'strip.slot') };
+    return {
+        target: readTarget(r['target'], 'strip.target'),
+        stats: readStatBlock(r['stats'], 'strip.stats'),
+        slot: string(r['slot'], 'strip.slot'),
+    };
 }
 
 function readModWeight(value: unknown, path: string): ModWeight {
@@ -479,7 +526,10 @@ function readModWeight(value: unknown, path: string): ModWeight {
 function readPobFilter(value: unknown, path: string): PobStatFilter {
     const r: JsonRecord = record(value, path);
     const v: unknown = r['value'];
-    return { id: string(r['id'], `${path}.id`), weight: isRecord(v) ? optional(v['weight'], `${path}.value.weight`, engineNumber) : undefined };
+    return {
+        id: string(r['id'], `${path}.id`),
+        weight: isRecord(v) ? optional(v['weight'], `${path}.value.weight`, engineNumber) : undefined,
+    };
 }
 
 function readPobGroup(value: unknown, path: string): PobStatGroup {
@@ -496,7 +546,10 @@ export function readTradeQuery(value: unknown): TradeQueryData {
         slot: string(r['slot'], `${path}.slot`),
         target: readTarget(r['target'], `${path}.target`),
         item: readItemInfo(r['item'], `${path}.item`),
-        category: { query: string(category['query'], `${path}.category.query`), generator: string(category['generator'], `${path}.category.generator`) },
+        category: {
+            query: string(category['query'], `${path}.category.query`),
+            generator: string(category['generator'], `${path}.category.generator`),
+        },
         statWeights: array(r['statWeights'], `${path}.statWeights`, (v: unknown, p: string) => {
             const w: JsonRecord = record(v, p);
             return { stat: string(w['stat'], `${p}.stat`), weight: number(w['weight'], `${p}.weight`) };
@@ -536,7 +589,12 @@ export function readScoreItem(value: unknown): ScoreItemResult {
 
 export function readScoreSummary(value: unknown): ScoreBatchSummary {
     const r: JsonRecord = record(value, 'score');
-    return { count: number(r['count'], 'score.count'), failed: number(r['failed'], 'score.failed'), gcRuns: number(r['gcRuns'], 'score.gcRuns'), seconds: number(r['seconds'], 'score.seconds') };
+    return {
+        count: number(r['count'], 'score.count'),
+        failed: number(r['failed'], 'score.failed'),
+        gcRuns: number(r['gcRuns'], 'score.gcRuns'),
+        seconds: number(r['seconds'], 'score.seconds'),
+    };
 }
 
 export function readPing(value: unknown): PingData {

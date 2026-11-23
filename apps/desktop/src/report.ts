@@ -83,7 +83,9 @@ function searchRows(searches: readonly SearchRecord[], bands: readonly PriceBand
 
 export function summaryText(input: SummaryInput): string {
     const r: RunResult = input.result;
-    const shown: FilteredItem[] = r.items.filter((f: FilteredItem) => f.hidden === undefined).sort((a: FilteredItem, b: FilteredItem) => b.evaluated.gain.gain - a.evaluated.gain.gain);
+    const shown: FilteredItem[] = r.items
+        .filter((f: FilteredItem) => f.hidden === undefined)
+        .sort((a: FilteredItem, b: FilteredItem) => b.evaluated.gain.gain - a.evaluated.gain.gain);
     const out: string[] = [];
     out.push(`${input.slot}, ${input.league}, budget ${input.budgetText}, divine ${input.rateText}`);
     if (r.stoppedReason !== undefined) {
@@ -94,20 +96,24 @@ export function summaryText(input: SummaryInput): string {
     out.push('');
     out.push(`Worth a look (${shown.length}), best gain first:`);
     const top: FilteredItem[] = shown.slice(0, input.top);
-    out.push(table(
-        ['#', 'gain %', 'DPS %', 'EHP %', 'price', 'band', 'item', 'tags'],
-        top.map((f: FilteredItem, i: number) => [
-            String(i + 1),
-            signed(f.evaluated.gain.gain, 2),
-            signed(f.evaluated.gain.dpsPct, 2),
-            signed(f.evaluated.gain.ehpPct, 2),
-            priceText(f.evaluated),
-            input.bands.find((b: PriceBand) => b.id === f.evaluated.item.bandId)?.role === 'over' ? 'over' : f.evaluated.item.bandId.replace('band-', ''),
-            itemName(f.evaluated),
-            tags(f.evaluated),
-        ]),
-        [true, true, true, true, true, false, false, false],
-    ).trimEnd());
+    out.push(
+        table(
+            ['#', 'gain %', 'DPS %', 'EHP %', 'price', 'band', 'item', 'tags'],
+            top.map((f: FilteredItem, i: number) => [
+                String(i + 1),
+                signed(f.evaluated.gain.gain, 2),
+                signed(f.evaluated.gain.dpsPct, 2),
+                signed(f.evaluated.gain.ehpPct, 2),
+                priceText(f.evaluated),
+                input.bands.find((b: PriceBand) => b.id === f.evaluated.item.bandId)?.role === 'over'
+                    ? 'over'
+                    : f.evaluated.item.bandId.replace('band-', ''),
+                itemName(f.evaluated),
+                tags(f.evaluated),
+            ]),
+            [true, true, true, true, true, false, false, false],
+        ).trimEnd(),
+    );
     if (top.length > 0) {
         out.push('');
         out.push('Buy links (open in your browser):');
@@ -122,7 +128,9 @@ export function summaryText(input: SummaryInput): string {
             hiddenCounts.set(f.hidden, (hiddenCounts.get(f.hidden) ?? 0) + 1);
         }
     }
-    out.push(`Run: ${r.counts.searches} searches, ${r.counts.fetched} fetched, ${r.counts.scored} scored, ${shown.length} worth a look; filtered out:`);
+    out.push(
+        `Run: ${r.counts.searches} searches, ${r.counts.fetched} fetched, ${r.counts.scored} scored, ${shown.length} worth a look; filtered out:`,
+    );
     for (const [reason, n] of hiddenCounts) {
         out.push(`  ${n} ${REASONS[reason]}`);
     }
@@ -136,10 +144,21 @@ export function summaryText(input: SummaryInput): string {
         out.push(`  floors broken: ${[...floorFails].map(([id, n]: [string, number]) => `${id} ${n}`).join(', ')}`);
     }
     if (r.counts.failed + r.counts.missing + r.counts.skipped > 0) {
-        out.push(`Issues: ${r.counts.failed} failed to score, ${r.counts.missing} gone before fetch, ${r.counts.skipped} skipped (unidentified, wrong slot, already fetched or unreadable)`);
+        out.push(
+            `Issues: ${r.counts.failed} failed to score, ${r.counts.missing} gone before fetch, ${r.counts.skipped} skipped (unidentified, wrong slot, already fetched or unreadable)`,
+        );
     }
     out.push('');
     out.push('Searches (complexity: predicted / site):');
-    out.push(table(['band', 'currency', 'total', 'ids', 'fetched', 'complexity'], searchRows(r.searches, input.bands), [false, false, true, true, true, true]).trimEnd());
+    out.push(
+        table(['band', 'currency', 'total', 'ids', 'fetched', 'complexity'], searchRows(r.searches, input.bands), [
+            false,
+            false,
+            true,
+            true,
+            true,
+            true,
+        ]).trimEnd(),
+    );
     return `${out.join('\n')}\n`;
 }

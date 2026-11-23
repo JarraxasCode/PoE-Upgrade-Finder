@@ -35,10 +35,14 @@ export function recordedListings(file: string): TradeListing[] {
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {
     return new Promise<void>((resolve: () => void) => {
         const t: ReturnType<typeof setTimeout> = setTimeout(resolve, ms);
-        signal?.addEventListener('abort', () => {
-            clearTimeout(t);
-            resolve();
-        }, { once: true });
+        signal?.addEventListener(
+            'abort',
+            () => {
+                clearTimeout(t);
+                resolve();
+            },
+            { once: true },
+        );
     });
 }
 
@@ -62,9 +66,20 @@ export class RecordedTrade implements RunTrade {
             await sleep(this.delayMs, signal);
         }
         const price = body.query.filters.trade_filters.filters.price;
-        const matching: TradeListing[] = this.listings.filter((l: TradeListing) =>
-            l.price !== undefined && l.price.currency === price.option && (price.min === undefined || l.price.amount >= price.min) && (price.max === undefined || l.price.amount <= price.max));
-        return { id: `q${this.bodies.length}`, ids: matching.slice(0, 100).map((l: TradeListing) => l.id), total: matching.length, inexact: false, complexity: undefined };
+        const matching: TradeListing[] = this.listings.filter(
+            (l: TradeListing) =>
+                l.price !== undefined &&
+                l.price.currency === price.option &&
+                (price.min === undefined || l.price.amount >= price.min) &&
+                (price.max === undefined || l.price.amount <= price.max),
+        );
+        return {
+            id: `q${this.bodies.length}`,
+            ids: matching.slice(0, 100).map((l: TradeListing) => l.id),
+            total: matching.length,
+            inexact: false,
+            complexity: undefined,
+        };
     }
 
     public async fetch(ids: readonly string[], _queryId?: string, signal?: AbortSignal): Promise<FetchResponse> {
@@ -74,7 +89,9 @@ export class RecordedTrade implements RunTrade {
         if (this.delayMs > 0) {
             await sleep(this.delayMs, signal);
         }
-        const listings: TradeListing[] = ids.map((id: string) => this.byId.get(id)).filter((l: TradeListing | undefined): l is TradeListing => l !== undefined);
+        const listings: TradeListing[] = ids
+            .map((id: string) => this.byId.get(id))
+            .filter((l: TradeListing | undefined): l is TradeListing => l !== undefined);
         return { listings: listings, missing: ids.filter((id: string) => !this.byId.has(id)), malformed: [] };
     }
 }

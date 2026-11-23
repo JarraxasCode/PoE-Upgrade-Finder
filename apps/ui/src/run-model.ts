@@ -1,6 +1,16 @@
 // What the Run view shows, worked out from the run's state. Pure (no DOM), so it is unit-tested.
 
-import type { HiddenReason, RunHeader, RunPhase, RunSnapshot, UiBand, UiItem, UiSearch } from '@poe-upgrade-finder/ipc';
+import type {
+    HiddenReason,
+    PlanCheckStatus,
+    RunHeader,
+    RunPhase,
+    RunSnapshot,
+    UiBand,
+    UiItem,
+    UiPlanCheck,
+    UiSearch,
+} from '@poe-upgrade-finder/ipc';
 
 /** While live the junk filter hasn't run yet: a "good find" passes the floors and clears the minimum gain. */
 export function isGoodFind(item: UiItem, minGainPct: number): boolean {
@@ -115,7 +125,12 @@ export function progress(snap: RunSnapshot): Progress {
     }
     const searching: number = rows.findIndex((r: BandRow) => r.status === 'searching');
     const doneCount: number = rows.filter((r: BandRow) => r.status === 'done' || r.status === 'refused').length;
-    return { scored: snap.items.length, expected: Math.max(expected, snap.items.length), bandIndex: searching >= 0 ? searching + 1 : doneCount, bands: rows.length };
+    return {
+        scored: snap.items.length,
+        expected: Math.max(expected, snap.items.length),
+        bandIndex: searching >= 0 ? searching + 1 : doneCount,
+        bands: rows.length,
+    };
 }
 
 export function isLive(phase: RunPhase): boolean {
@@ -136,11 +151,11 @@ export function priceText(item: UiItem): string {
 }
 
 export const HIDDEN_LABELS: Readonly<Record<HiddenReason, string>> = {
-    'floor': 'break a floor',
+    floor: 'break a floor',
     'no-gain': 'no gain figure',
     'low-gain': 'side-grades under the minimum gain',
-    'duplicate': 'listed again by the same seller',
-    'dominated': 'beaten by something cheaper',
+    duplicate: 'listed again by the same seller',
+    dominated: 'beaten by something cheaper',
 };
 
 export function hiddenCounts(items: readonly UiItem[]): Map<HiddenReason, number> {
@@ -151,4 +166,56 @@ export function hiddenCounts(items: readonly UiItem[]): Map<HiddenReason, number
         }
     }
     return out;
+}
+
+/** The plan chip on a find's row: every check met, some missed, or not checkable; null without a plan. */
+export interface PlanChip {
+    readonly text: string;
+    readonly status: PlanCheckStatus;
+}
+
+export function planChip(checks: readonly UiPlanCheck[]): PlanChip | null {
+    if (checks.length === 0) {
+        return null;
+    }
+    const missed: number = checks.filter((c: UiPlanCheck) => c.status === 'missed').length;
+    if (missed > 0) {
+        return { text: `Plan: ${missed} missed`, status: 'missed' };
+    }
+    if (checks.some((c: UiPlanCheck) => c.status === 'unknown')) {
+        return { text: 'Plan: not checked', status: 'unknown' };
+    }
+    return { text: 'Plan ✓', status: 'met' };
+}
+
+export const PLAN_MARK: Readonly<Record<PlanCheckStatus, string>> = { met: '✓', missed: '✗', unknown: '?' };
+
+/** One check as a line of text: "✓ +# total to Dexterity (≥ 30): total 34". */
+export function planCheckText(c: UiPlanCheck): string {
+    const what: string = c.kind === 'exclude' ? `none of: ${c.label}` : c.label;
+    return `${PLAN_MARK[c.status]} ${what}${c.value === null ? '' : `: ${c.value}`}`;
+}
+
+/** A check's value on its chip: a defence as the site compares it (the at-20% figure), anything else as is. */
+export function chipValue(c: UiPlanCheck): string | null {
+    if (c.value === null) {
+        return null;
+    }
+    if (c.kind === 'defence') {
+        const at20: RegExpMatchArray | null = /([\d,.]+) at 20%/.exec(c.value);
+        if (at20?.[1] !== undefined) {
+            return at20[1];
+        }
+    }
+    return c.value.replace(/^total /, '');
+}
+
+/** The run's slot was empty in PoB (issue #33): main names the current item "nothing" and has no view of it. */
+export function slotWasEmpty(h: RunHeader): boolean {
+    return h.currentView === null && h.currentItem === 'nothing';
+}
+
+/** "your Gale Talons, Leviathan Gauntlets", or "an empty slot". */
+export function currentItemText(h: RunHeader): string {
+    return slotWasEmpty(h) ? 'an empty slot' : `your ${h.currentItem}`;
 }

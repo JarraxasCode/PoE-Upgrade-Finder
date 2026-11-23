@@ -5,7 +5,7 @@
 // Not a trade call, so it doesn't use the trade limiter: one request at a time (the caller awaits each),
 // with a retry and backoff on network errors, 429 and 5xx. A 404 fails at once.
 
-import { record, string, ValidationError } from '@poe-upgrade-finder/validate';
+import { messageOf, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 
 export const POB_REPO: string = 'PathOfBuildingCommunity/PathOfBuilding';
 
@@ -47,7 +47,10 @@ export class FetchError extends Error {
 }
 
 function encodePath(path: string): string {
-    return path.split('/').map((segment: string) => encodeURIComponent(segment)).join('/');
+    return path
+        .split('/')
+        .map((segment: string) => encodeURIComponent(segment))
+        .join('/');
 }
 
 function defaultSleep(ms: number): Promise<void> {
@@ -139,7 +142,7 @@ export class GitHubSource implements PobSource {
                 if (this.signal?.aborted === true) {
                     throw new FetchError(`GET ${url}: cancelled`, undefined);
                 }
-                lastError = new FetchError(`GET ${url}: ${error instanceof Error ? error.message : String(error)}`, undefined);
+                lastError = new FetchError(`GET ${url}: ${messageOf(error)}`, undefined);
                 continue;
             }
             if (response.ok) {

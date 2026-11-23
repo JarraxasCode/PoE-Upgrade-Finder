@@ -20,8 +20,19 @@ export interface ValueSettings {
 }
 
 export type Verdict =
-    | { readonly kind: 'no-upgrade'; readonly best: EvaluatedItem | undefined; readonly note: string; readonly overBudget: readonly EvaluatedItem[] }
-    | { readonly kind: 'pick'; readonly pick: EvaluatedItem; readonly best: EvaluatedItem; readonly note: string; readonly overBudget: readonly EvaluatedItem[] };
+    | {
+          readonly kind: 'no-upgrade';
+          readonly best: EvaluatedItem | undefined;
+          readonly note: string;
+          readonly overBudget: readonly EvaluatedItem[];
+      }
+    | {
+          readonly kind: 'pick';
+          readonly pick: EvaluatedItem;
+          readonly best: EvaluatedItem;
+          readonly note: string;
+          readonly overBudget: readonly EvaluatedItem[];
+      };
 
 function pct(n: number): string {
     return `${n > 0 ? '+' : ''}${n.toFixed(2)}%`;
@@ -37,9 +48,17 @@ export function valuePick(items: readonly FilteredItem[], bands: readonly PriceB
     const share: number = settings.valueShare ?? DEFAULT_VALUE_SHARE;
     const roleOf: Map<string, BandRole> = new Map<string, BandRole>(bands.map((b: PriceBand) => [b.id, b.role]));
     const eligible = (f: FilteredItem): boolean =>
-        f.hidden !== 'floor' && f.hidden !== 'duplicate' && f.hidden !== 'no-gain' && f.evaluated.item.chaosEquivalent !== undefined && !Number.isNaN(f.evaluated.gain.gain);
-    const inBudget: EvaluatedItem[] = items.filter((f: FilteredItem) => eligible(f) && roleOf.get(f.evaluated.item.bandId) === 'main').map((f: FilteredItem) => f.evaluated);
-    const overCandidates: EvaluatedItem[] = items.filter((f: FilteredItem) => eligible(f) && roleOf.get(f.evaluated.item.bandId) === 'over').map((f: FilteredItem) => f.evaluated);
+        f.hidden !== 'floor' &&
+        f.hidden !== 'duplicate' &&
+        f.hidden !== 'no-gain' &&
+        f.evaluated.item.chaosEquivalent !== undefined &&
+        !Number.isNaN(f.evaluated.gain.gain);
+    const inBudget: EvaluatedItem[] = items
+        .filter((f: FilteredItem) => eligible(f) && roleOf.get(f.evaluated.item.bandId) === 'main')
+        .map((f: FilteredItem) => f.evaluated);
+    const overCandidates: EvaluatedItem[] = items
+        .filter((f: FilteredItem) => eligible(f) && roleOf.get(f.evaluated.item.bandId) === 'over')
+        .map((f: FilteredItem) => f.evaluated);
 
     let best: EvaluatedItem | undefined;
     for (const e of inBudget) {
@@ -53,7 +72,10 @@ export function valuePick(items: readonly FilteredItem[], bands: readonly PriceB
         .filter((e: EvaluatedItem) => e.gain.gain > Math.max(bestGain, minGain))
         .sort((a: EvaluatedItem, b: EvaluatedItem) => b.gain.gain - a.gain.gain);
     if (best === undefined || best.gain.gain < minGain) {
-        const note: string = best === undefined ? 'No upgrade found: nothing in budget passed the floors.' : `No upgrade found: the best in budget is ${describe(best)}, under the +${minGain}% minimum.`;
+        const note: string =
+            best === undefined
+                ? 'No upgrade found: nothing in budget passed the floors.'
+                : `No upgrade found: the best in budget is ${describe(best)}, under the +${minGain}% minimum.`;
         return { kind: 'no-upgrade', best: best, note: note, overBudget: overBudget };
     }
     const threshold: number = Math.max(share * best.gain.gain, minGain);

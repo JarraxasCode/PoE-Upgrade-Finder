@@ -24,8 +24,14 @@ test('ago', () => {
 });
 
 test('build labels', () => {
-    assert.equal(buildLabel({ id: 'a.xml', name: 'RF', folder: '', className: 'Marauder', ascendClassName: 'Chieftain', level: 94, modifiedMs: 0 }), 'RF · Chieftain 94');
-    assert.equal(buildLabel({ id: 'a.xml', name: 'Blank', folder: '', className: null, ascendClassName: null, level: null, modifiedMs: 0 }), 'Blank');
+    assert.equal(
+        buildLabel({ id: 'a.xml', name: 'RF', folder: '', className: 'Marauder', ascendClassName: 'Chieftain', level: 94, modifiedMs: 0 }),
+        'RF · Chieftain 94',
+    );
+    assert.equal(
+        buildLabel({ id: 'a.xml', name: 'Blank', folder: '', className: null, ascendClassName: null, level: null, modifiedMs: 0 }),
+        'Blank',
+    );
 });
 
 test('budgets', () => {

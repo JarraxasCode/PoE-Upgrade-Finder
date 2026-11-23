@@ -40,13 +40,19 @@ export function Price(props: PriceProps): JSX.Element {
     }
     const lines: string[] = [];
     if (props.chaosPerDivine !== null && props.chaos !== null) {
-        lines.push(p.currency === 'divine'
-            ? `About ${Math.round(props.chaos)} chaos at ${props.chaosPerDivine.toFixed(1)} chaos per divine.`
-            : `About ${(props.chaos / props.chaosPerDivine).toFixed(3)} divine at ${props.chaosPerDivine.toFixed(1)} chaos per divine.`);
+        lines.push(
+            p.currency === 'divine'
+                ? `About ${Math.round(props.chaos)} chaos at ${props.chaosPerDivine.toFixed(1)} chaos per divine.`
+                : `About ${(props.chaos / props.chaosPerDivine).toFixed(3)} divine at ${props.chaosPerDivine.toFixed(1)} chaos per divine.`,
+        );
     }
-    lines.push('The seller\'s listed price. Bands, the budget and the chart use the chaos figure.');
+    lines.push("The seller's listed price. Bands, the budget and the chart use the chaos figure.");
     return (
-        <Info tipKey={props.tipKey} title={`${amountText(p.amount)} ${ORBS[p.currency]?.name ?? p.currency}${p.amount === 1 ? '' : 's'}`} lines={lines}>
+        <Info
+            tipKey={props.tipKey}
+            title={`${amountText(p.amount)} ${ORBS[p.currency]?.name ?? p.currency}${p.amount === 1 ? '' : 's'}`}
+            lines={lines}
+        >
             <Orb currency={p.currency} amount={p.amount} />
         </Info>
     );

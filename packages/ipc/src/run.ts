@@ -7,12 +7,14 @@ import type { JsonRecord } from '@poe-upgrade-finder/validate';
 import type { GearSlot, ListingType, SearchDepth } from './contract.ts';
 import { readOptionalItemView } from './item-view.ts';
 import type { ItemView } from './item-view.ts';
+import type { SlotPlan } from './plan.ts';
 
 type Read<T> = (value: unknown, path: string) => T;
 
 export interface RunRequest {
     readonly buildId: string;
-    readonly slot: GearSlot;
+    /** One slot plan per slot to search (PLAN.md, "v2a"). v0.2: exactly one (checked at the boundary); v0.4 lifts that. */
+    readonly slots: readonly SlotPlan[];
     /** As typed: "300", "300c", "1.5d". */
     readonly budget: string;
     /** The min price as typed ("100d"); empty for none. Nothing cheaper is searched. */
@@ -54,6 +56,32 @@ export interface StatChange {
     readonly unit: '' | '%';
 }
 
+/** include: the slot plan's; need: the build's hard need (from the strip); exclude; defence. */
+export type PlanCheckKind = 'include' | 'need' | 'exclude' | 'defence';
+export const PLAN_CHECK_KINDS: readonly PlanCheckKind[] = ['include', 'need', 'exclude', 'defence'];
+
+/** met: as the site should have it; missed: by the app's reading it doesn't; unknown: the lines aren't known. */
+export type PlanCheckStatus = 'met' | 'missed' | 'unknown';
+export const PLAN_CHECK_STATUSES: readonly PlanCheckStatus[] = ['met', 'missed', 'unknown'];
+
+/** A line of the item that counts for a check. */
+export interface UiPlanLine {
+    readonly text: string;
+    /** "crafted", "implicit", "fractured", "half" (Strength towards life)...; empty for a plain explicit line. */
+    readonly note: string;
+}
+
+/** One requirement, exclusion or defence of the run, against one item (issue #6). */
+export interface UiPlanCheck {
+    readonly kind: PlanCheckKind;
+    /** "+# total to Dexterity (≥ 30)". */
+    readonly label: string;
+    readonly status: PlanCheckStatus;
+    /** "total 34", "418 listed, 502 at 20% quality"; null when there's nothing to show. */
+    readonly value: string | null;
+    readonly lines: readonly UiPlanLine[];
+}
+
 export interface UiItem {
     readonly id: string;
     readonly name: string;
@@ -79,6 +107,8 @@ export interface UiItem {
     readonly view: ItemView | null;
     /** Stats that change against the current item, in reading order. */
     readonly changes: readonly StatChange[];
+    /** The run's includes, hard needs, excludes and defences against this item; empty without any. */
+    readonly planChecks: readonly UiPlanCheck[];
     readonly hasBuyLink: boolean;
     /** Set in the summary (the junk filter runs at the end); null while live or when shown. */
     readonly hidden: HiddenReason | null;
@@ -92,6 +122,38 @@ export interface SearchedStat {
     readonly weight: number;
 }
 
+/** A weight the slot plan takes out. */
+export interface PrunedStat {
+    readonly statId: string;
+    readonly label: string;
+    readonly weight: number;
+    /** core's PruneReason. */
+    readonly reason: PruneReasonUi;
+    readonly text: string;
+}
+
+export type PruneReasonUi =
+    | 'excluded'
+    | 'included'
+    | 'base-cannot-roll'
+    | 'same-group'
+    | 'prefixes-full'
+    | 'suffixes-full'
+    | 'affixes-full'
+    | 'no-room'
+    | 'defences';
+export const PRUNE_REASONS: readonly PruneReasonUi[] = [
+    'excluded',
+    'included',
+    'base-cannot-roll',
+    'same-group',
+    'prefixes-full',
+    'suffixes-full',
+    'affixes-full',
+    'no-room',
+    'defences',
+];
+
 /** The weight review list: PoB's weights before the user's edits. */
 export interface WeightPreview {
     readonly buildId: string;
@@ -99,8 +161,38 @@ export interface WeightPreview {
     readonly target: string;
     /** PoB's weights, heaviest first. */
     readonly weights: readonly SearchedStat[];
+    /** The weights the slot plan takes out, each with its reason (empty without a plan). */
+    readonly pruned: readonly PrunedStat[];
+    /** Why the plan can't be searched (each refuses it); empty when it can. */
+    readonly planProblems: readonly string[];
+    /** What the plan's check changed (a redundant exclude left out). */
+    readonly planNotes: readonly string[];
     /** True when the generator's result came from the cache. */
     readonly cached: boolean;
+}
+
+/** The slot plan a run searched with, for the Run view's header (issue #6). */
+export interface UiRunPlan {
+    /** PoB's item type; null: the equipped item's category. */
+    readonly itemType: string | null;
+    /** The site's base name; null: any base. */
+    readonly base: string | null;
+    /** "+# total to Dexterity (≥ 30)". */
+    readonly includes: readonly UiPlanRule[];
+    readonly excludes: readonly string[];
+    /** "Armour (≥ 500)". */
+    readonly defences: readonly string[];
+    readonly influences: readonly string[];
+    /** How many of PoB's weights the plan took out. */
+    readonly pruned: number;
+    /** What the plan's check changed. */
+    readonly notes: readonly string[];
+}
+
+export interface UiPlanRule {
+    readonly label: string;
+    /** What else counts towards a total ("implicits, crafted and fractured lines, +all Attributes..."); null for one stat. */
+    readonly counts: string | null;
 }
 
 export interface RunHeader {
@@ -127,6 +219,10 @@ export interface RunHeader {
     readonly currentView: ItemView | null;
     readonly weightedStats: number;
     readonly hardNeeds: readonly string[];
+    /** The slot plan; null when the run had none (searched as v0.1). */
+    readonly plan: UiRunPlan | null;
+    /** The level requirement filter as searched: "Up to level 92 (your level)", "Up to level 70", "Any level". */
+    readonly levelFilter: string;
     /** PoB's weights, heaviest first. */
     readonly searchedFor: readonly SearchedStat[];
     readonly bands: readonly UiBand[];
@@ -227,7 +323,11 @@ const strings: Read<readonly string[]> = (value: unknown, path: string) => array
 
 function band(value: unknown, path: string): UiBand {
     const r: JsonRecord = record(value, path);
-    return { id: string(r['id'], `${path}.id`), label: string(r['label'], `${path}.label`), role: oneOf(r['role'], `${path}.role`, ['main', 'over'] as const) };
+    return {
+        id: string(r['id'], `${path}.id`),
+        label: string(r['label'], `${path}.label`),
+        role: oneOf(r['role'], `${path}.role`, ['main', 'over'] as const),
+    };
 }
 
 export function readUiSearch(value: unknown, path: string): UiSearch {
@@ -249,7 +349,27 @@ function price(value: unknown, path: string): UiPrice {
 
 function statChange(value: unknown, path: string): StatChange {
     const r: JsonRecord = record(value, path);
-    return { label: string(r['label'], `${path}.label`), delta: finite(r['delta'], `${path}.delta`), unit: oneOf(r['unit'], `${path}.unit`, ['', '%'] as const) };
+    return {
+        label: string(r['label'], `${path}.label`),
+        delta: finite(r['delta'], `${path}.delta`),
+        unit: oneOf(r['unit'], `${path}.unit`, ['', '%'] as const),
+    };
+}
+
+function planLine(value: unknown, path: string): UiPlanLine {
+    const r: JsonRecord = record(value, path);
+    return { text: string(r['text'], `${path}.text`), note: string(r['note'], `${path}.note`) };
+}
+
+function planCheck(value: unknown, path: string): UiPlanCheck {
+    const r: JsonRecord = record(value, path);
+    return {
+        kind: oneOf(r['kind'], `${path}.kind`, PLAN_CHECK_KINDS),
+        label: string(r['label'], `${path}.label`),
+        status: oneOf(r['status'], `${path}.status`, PLAN_CHECK_STATUSES),
+        value: optString(r['value'], `${path}.value`),
+        lines: array(r['lines'], `${path}.lines`, planLine),
+    };
 }
 
 export function readUiItem(value: unknown, path: string): UiItem {
@@ -274,6 +394,7 @@ export function readUiItem(value: unknown, path: string): UiItem {
         text: string(r['text'], `${path}.text`),
         view: readOptionalItemView(r['view'], `${path}.view`),
         changes: r['changes'] === undefined ? [] : array(r['changes'], `${path}.changes`, statChange),
+        planChecks: r['planChecks'] === undefined ? [] : array(r['planChecks'], `${path}.planChecks`, planCheck),
         hasBuyLink: boolean(r['hasBuyLink'], `${path}.hasBuyLink`),
         hidden: nullable((v: unknown, p: string) => oneOf(v, p, HIDDEN_REASONS))(r['hidden'], `${path}.hidden`),
         hiddenBy: optString(r['hiddenBy'], `${path}.hiddenBy`),
@@ -284,7 +405,20 @@ const SLOTS = ['Helmet', 'Body Armour', 'Gloves', 'Boots', 'Amulet', 'Ring 1', '
 
 function searchedStat(v: unknown, p: string): SearchedStat {
     const s: JsonRecord = record(v, p);
-    return { statId: string(s['statId'], `${p}.statId`), label: string(s['label'], `${p}.label`), weight: finite(s['weight'], `${p}.weight`) };
+    return {
+        statId: string(s['statId'], `${p}.statId`),
+        label: string(s['label'], `${p}.label`),
+        weight: finite(s['weight'], `${p}.weight`),
+    };
+}
+
+function prunedStat(v: unknown, p: string): PrunedStat {
+    const s: JsonRecord = record(v, p);
+    return {
+        ...searchedStat(v, p),
+        reason: oneOf(s['reason'], `${p}.reason`, PRUNE_REASONS),
+        text: string(s['text'], `${p}.text`),
+    };
 }
 
 export function readWeightPreview(value: unknown, path: string): WeightPreview {
@@ -294,7 +428,29 @@ export function readWeightPreview(value: unknown, path: string): WeightPreview {
         slot: oneOf(r['slot'], `${path}.slot`, SLOTS),
         target: string(r['target'], `${path}.target`),
         weights: array(r['weights'], `${path}.weights`, searchedStat),
+        pruned: array(r['pruned'], `${path}.pruned`, prunedStat),
+        planProblems: array(r['planProblems'], `${path}.planProblems`, string),
+        planNotes: array(r['planNotes'], `${path}.planNotes`, string),
         cached: boolean(r['cached'], `${path}.cached`),
+    };
+}
+
+function planRule(v: unknown, p: string): UiPlanRule {
+    const r: JsonRecord = record(v, p);
+    return { label: string(r['label'], `${p}.label`), counts: optString(r['counts'], `${p}.counts`) };
+}
+
+function runPlan(value: unknown, path: string): UiRunPlan {
+    const r: JsonRecord = record(value, path);
+    return {
+        itemType: optString(r['itemType'], `${path}.itemType`),
+        base: optString(r['base'], `${path}.base`),
+        includes: array(r['includes'], `${path}.includes`, planRule),
+        excludes: strings(r['excludes'], `${path}.excludes`),
+        defences: strings(r['defences'], `${path}.defences`),
+        influences: strings(r['influences'], `${path}.influences`),
+        pruned: finite(r['pruned'], `${path}.pruned`),
+        notes: strings(r['notes'], `${path}.notes`),
     };
 }
 
@@ -322,6 +478,8 @@ export function readRunHeader(value: unknown, path: string): RunHeader {
         currentView: readOptionalItemView(r['currentView'], `${path}.currentView`),
         weightedStats: finite(r['weightedStats'], `${path}.weightedStats`),
         hardNeeds: strings(r['hardNeeds'], `${path}.hardNeeds`),
+        plan: nullable(runPlan)(r['plan'], `${path}.plan`),
+        levelFilter: string(r['levelFilter'], `${path}.levelFilter`),
         searchedFor: array(r['searchedFor'], `${path}.searchedFor`, searchedStat),
         bands: array(r['bands'], `${path}.bands`, band),
     };
@@ -331,7 +489,11 @@ const FEED_LEVELS: readonly FeedLevel[] = ['info', 'warn', 'error'];
 
 function feedEntry(value: unknown, path: string): FeedEntry {
     const r: JsonRecord = record(value, path);
-    return { atMs: finite(r['atMs'], `${path}.atMs`), level: oneOf(r['level'], `${path}.level`, FEED_LEVELS), text: string(r['text'], `${path}.text`) };
+    return {
+        atMs: finite(r['atMs'], `${path}.atMs`),
+        level: oneOf(r['level'], `${path}.level`, FEED_LEVELS),
+        text: string(r['text'], `${path}.text`),
+    };
 }
 
 function counts(value: unknown, path: string): RunCountsUi {
@@ -369,7 +531,12 @@ function limitPolicy(value: unknown, path: string): LimitPolicy {
         policy: string(r['policy'], `${path}.policy`),
         windows: array(r['windows'], `${path}.windows`, (v: unknown, p: string): LimitWindow => {
             const w: JsonRecord = record(v, p);
-            return { count: finite(w['count'], `${p}.count`), allowed: finite(w['allowed'], `${p}.allowed`), limit: finite(w['limit'], `${p}.limit`), periodS: finite(w['periodS'], `${p}.periodS`) };
+            return {
+                count: finite(w['count'], `${p}.count`),
+                allowed: finite(w['allowed'], `${p}.allowed`),
+                limit: finite(w['limit'], `${p}.limit`),
+                periodS: finite(w['periodS'], `${p}.periodS`),
+            };
         }),
     };
 }
@@ -380,7 +547,11 @@ export function readLimitPanel(value: unknown, path: string): LimitPanel {
         policies: array(r['policies'], `${path}.policies`, limitPolicy),
         wait: nullable((v: unknown, p: string) => {
             const w: JsonRecord = record(v, p);
-            return { policy: string(w['policy'], `${p}.policy`), untilMs: finite(w['untilMs'], `${p}.untilMs`), reason: string(w['reason'], `${p}.reason`) };
+            return {
+                policy: string(w['policy'], `${p}.policy`),
+                untilMs: finite(w['untilMs'], `${p}.untilMs`),
+                reason: string(w['reason'], `${p}.reason`),
+            };
         })(r['wait'], `${path}.wait`),
     };
 }
@@ -417,7 +588,12 @@ export function readRunEvent(value: JsonRecord): RunEventUi | undefined {
         case 'run-done':
             return { kind: 'run-done', runId: runId(), summary: readRunSummary(value['summary'], 'event.summary') };
         case 'run-deepen':
-            return { kind: 'run-deepen', runId: runId(), header: readRunHeader(value['header'], 'event.header'), searches: array(value['searches'], 'event.searches', readUiSearch) };
+            return {
+                kind: 'run-deepen',
+                runId: runId(),
+                header: readRunHeader(value['header'], 'event.header'),
+                searches: array(value['searches'], 'event.searches', readUiSearch),
+            };
         default:
             return undefined;
     }

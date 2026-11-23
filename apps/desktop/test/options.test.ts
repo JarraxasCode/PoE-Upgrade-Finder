@@ -28,8 +28,24 @@ test('headless options: defaults and parsing', () => {
     assert.equal(o.dryRun, false);
 
     const q: HeadlessOptions = parseHeadless([
-        '--build', 'b.xml', '--slot', 'Ring 1', '--budget', '1d', '--depth', 'quick', '--listing', 'whisper', '--rate', '207.9',
-        '--target', 'skill:2.1', '--no-record', '--dry-run', '--league', 'Hardcore Covens',
+        '--build',
+        'b.xml',
+        '--slot',
+        'Ring 1',
+        '--budget',
+        '1d',
+        '--depth',
+        'quick',
+        '--listing',
+        'whisper',
+        '--rate',
+        '207.9',
+        '--target',
+        'skill:2.1',
+        '--no-record',
+        '--dry-run',
+        '--league',
+        'Hardcore Covens',
     ]);
     assert.equal(q.perBand, 20);
     assert.equal(q.listing, 'online');

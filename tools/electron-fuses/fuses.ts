@@ -88,7 +88,9 @@ function main(command: string | undefined): number {
         return 1;
     }
     if (command === undefined || command === 'read') {
-        process.stdout.write(`${JSON.stringify({ binary: exe, version: state.version, wire: state.wire, fuses: state.fuses, backupExists: existsSync(backup) }, null, 2)}\n`);
+        process.stdout.write(
+            `${JSON.stringify({ binary: exe, version: state.version, wire: state.wire, fuses: state.fuses, backupExists: existsSync(backup) }, null, 2)}\n`,
+        );
         return 0;
     }
     if (command !== 'enable-cookie-encryption') {
@@ -115,7 +117,9 @@ function main(command: string | undefined): number {
     buffer[state.offset + index] = '1'.charCodeAt(0);
     writeFileSync(exe, buffer);
     const after: FuseWire | undefined = readFuseWire(readFileSync(exe));
-    process.stdout.write(`EnableCookieEncryption: ${state.fuses['EnableCookieEncryption'] ?? '?'} -> ${after?.fuses['EnableCookieEncryption'] ?? '?'} (wire ${state.wire} -> ${after?.wire ?? '?'})\n`);
+    process.stdout.write(
+        `EnableCookieEncryption: ${state.fuses['EnableCookieEncryption'] ?? '?'} -> ${after?.fuses['EnableCookieEncryption'] ?? '?'} (wire ${state.wire} -> ${after?.wire ?? '?'})\n`,
+    );
     return 0;
 }
 

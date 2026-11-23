@@ -25,6 +25,7 @@ import {
     stageUpdate,
     verifyCopy,
 } from '@poe-upgrade-finder/pob-update';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export interface CurrentPob {
     readonly version: string;
@@ -112,7 +113,11 @@ export class PobUpdates {
         const updated: string | undefined = current === undefined ? undefined : this.dirOf(current.version);
         const bundled: string | undefined = this.options.bundledDir;
         const bundledVersion: string | null = bundled === undefined ? null : manifestVersion(bundled);
-        if (updated !== undefined && current !== undefined && (bundledVersion === null || compareVersions(current.version, bundledVersion) > 0)) {
+        if (
+            updated !== undefined &&
+            current !== undefined &&
+            (bundledVersion === null || compareVersions(current.version, bundledVersion) > 0)
+        ) {
             return updated;
         }
         return bundled;
@@ -123,7 +128,12 @@ export class PobUpdates {
         const liveVersion: string | null = live === undefined ? null : manifestVersion(live);
         const current: CurrentPob | undefined = readCurrent(this.options.root);
         const previous: string | null =
-            current !== undefined && current.version === liveVersion && current.previous !== null && this.dirOf(current.previous) !== undefined ? current.previous : null;
+            current !== undefined &&
+            current.version === liveVersion &&
+            current.previous !== null &&
+            this.dirOf(current.previous) !== undefined
+                ? current.previous
+                : null;
         return {
             live: liveVersion,
             latest: this.latest,
@@ -154,7 +164,7 @@ export class PobUpdates {
             this.options.logger.log('info', 'pob latest release', { latest: this.latest, live: this.state().live });
             return this.set('idle', null, null);
         } catch (error: unknown) {
-            const message: string = error instanceof Error ? error.message : String(error);
+            const message: string = messageOf(error);
             this.options.logger.log('warn', 'pob update check failed', { error: message });
             return this.set('failed', null, `Couldn't reach PoB Community's GitHub: ${message}`);
         }
@@ -208,7 +218,10 @@ export class PobUpdates {
                 throw new Error(`the v${latest} tag's manifest says ${report.version}`);
             }
             this.set('updating', 'Checking every file', null);
-            const bad: readonly string[] = await verifyCopy(stagingDir, parseManifest(readFileSync(join(stagingDir, 'manifest.xml'), 'utf8')));
+            const bad: readonly string[] = await verifyCopy(
+                stagingDir,
+                parseManifest(readFileSync(join(stagingDir, 'manifest.xml'), 'utf8')),
+            );
             // (verified before the rebuild, so QueryMods.lua is still PoB's own here)
             if (bad.length > 0) {
                 throw new Error(`${bad.length} files don't match the manifest (${bad.slice(0, 3).join(', ')})`);
@@ -238,10 +251,21 @@ export class PobUpdates {
                 smoke: smokeNote,
             });
             this.set('updating', 'Restarting the engine', null);
-            await swap();
+            try {
+                await swap();
+            } catch (error: unknown) {
+                // The new copy is already live on disk (current.json names it): only the restart failed.
+                const message: string = messageOf(error);
+                log.log('warn', 'pob update installed, engine restart failed', { to: latest, error: message });
+                return this.set(
+                    'failed',
+                    null,
+                    `PoB ${latest} is installed, but the engine didn't restart: ${message}. Restart the app to use it.`,
+                );
+            }
             return this.set('idle', null, `Updated to PoB ${latest} (${report.fetched.length} files downloaded). ${smokeNote}`);
         } catch (error: unknown) {
-            const message: string = error instanceof Error ? error.message : String(error);
+            const message: string = messageOf(error);
             log.log('warn', 'pob update failed', { from: liveVersion, to: this.latest, error: message });
             rmSync(staging, { recursive: true, force: true });
             for (const name of this.list()) {

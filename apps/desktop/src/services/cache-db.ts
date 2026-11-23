@@ -3,23 +3,28 @@
 //   - divine_rate: the last rate per league (GGG's hour or a typed one), replacing divine-rate.json;
 //   - trade_stats: the trade site's stat list for ModCatalog (refreshed after a week);
 //   - generator: PoB's trade query per build file, slot, damage target, blend and PoB version (V23: PoB's
-//     generator weights vary from worker to worker, so v1 caches one result and reuses it).
+//     generator weights vary from worker to worker, so v1 caches one result and reuses it);
+//   - slot_data: what can roll on each base of a base type (the engine's slotData), per PoB version;
+//   - build_summary: a build's figures (DPS, EHP, life, class) per save hash, damage target, PoB and app
+//     version, shown while PoB loads the build again and replaced by the live load.
 // Every row is checked when read; a bad row is deleted and treated as missing.
 
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
-import { readTradeQuery } from '@poe-upgrade-finder/engine-client';
-import type { TargetRequest, TradeQueryData } from '@poe-upgrade-finder/engine-client';
+import { readSlotData, readTradeQuery } from '@poe-upgrade-finder/engine-client';
+import type { SlotData, TargetRequest, TradeQueryData } from '@poe-upgrade-finder/engine-client';
 import { readStatList } from '@poe-upgrade-finder/trade';
 import type { DivineRate, RateStore, TradeStatEntry } from '@poe-upgrade-finder/trade';
 import { array, isRecord } from '@poe-upgrade-finder/validate';
-import { readEquippedInfo } from '@poe-upgrade-finder/ipc';
-import type { EquippedInfo } from '@poe-upgrade-finder/ipc';
+import { readBuildSummary, readEquippedInfo } from '@poe-upgrade-finder/ipc';
+import type { BuildSummary, EquippedInfo } from '@poe-upgrade-finder/ipc';
 
-const SCHEMA_VERSION: number = 3;
+const SCHEMA_VERSION: number = 5;
 /** Builds whose gear is remembered. */
 const EQUIPPED_KEEP: number = 50;
+/** Build summaries kept (newest first). */
+const SUMMARY_KEEP: number = 100;
 /** Generator rows kept (newest first); older ones are pruned on write. */
 const GENERATOR_KEEP: number = 200;
 
@@ -38,6 +43,28 @@ export interface GeneratorKey {
  */
 const GENERATOR_DATA: number = 2;
 
+/** Bumped when the slotData command's output changes without the PoB version changing. */
+const SLOT_DATA_FORMAT: number = 3;
+
+function slotDataVersion(pobVersion: string): string {
+    return `${pobVersion}#${SLOT_DATA_FORMAT}`;
+}
+
+/** Everything a build's figures depend on: any difference is a different key, so a cached summary is never stale. */
+export interface SummaryKey {
+    /** sha1 of the save's text (LoadedBuild.xmlHash). */
+    readonly xmlHash: string;
+    readonly targetId: string;
+    readonly pobVersion: string;
+    /** Our own engine code and what it reads can change between app versions. */
+    readonly appVersion: string;
+}
+
+export function summaryKey(key: SummaryKey): string {
+    const text: string = JSON.stringify([key.xmlHash, key.targetId, key.pobVersion, key.appVersion]);
+    return createHash('sha256').update(text).digest('hex');
+}
+
 export function generatorKey(key: GeneratorKey): string {
     const text: string = JSON.stringify([key.xmlHash, key.slot, key.target, key.blend, key.pobVersion, GENERATOR_DATA]);
     return createHash('sha256').update(text).digest('hex');
@@ -48,7 +75,12 @@ function readRate(value: unknown): DivineRate | undefined {
         return undefined;
     }
     const { chaosPerDivine, source, hour, at } = value;
-    if (typeof chaosPerDivine !== 'number' || !(chaosPerDivine > 0) || (source !== 'ggg' && source !== 'manual') || typeof at !== 'number') {
+    if (
+        typeof chaosPerDivine !== 'number' ||
+        !(chaosPerDivine > 0) ||
+        (source !== 'ggg' && source !== 'manual') ||
+        typeof at !== 'number'
+    ) {
         return undefined;
     }
     return { chaosPerDivine: chaosPerDivine, source: source, hour: typeof hour === 'number' ? hour : undefined, at: at };
@@ -82,7 +114,9 @@ export class CacheDb {
     /** The divine-rate store for DivineRateClient. */
     public rateStore(): RateStore {
         const get: StatementSync = this.db.prepare('SELECT value FROM divine_rate WHERE league = ?');
-        const put: StatementSync = this.db.prepare('INSERT INTO divine_rate (league, value) VALUES (?, ?) ON CONFLICT(league) DO UPDATE SET value = excluded.value');
+        const put: StatementSync = this.db.prepare(
+            'INSERT INTO divine_rate (league, value) VALUES (?, ?) ON CONFLICT(league) DO UPDATE SET value = excluded.value',
+        );
         const del: StatementSync = this.db.prepare('DELETE FROM divine_rate WHERE league = ?');
         return {
             get: (league: string): DivineRate | undefined => {
@@ -122,9 +156,14 @@ export class CacheDb {
     public saveGenerator(key: string, data: TradeQueryData): void {
         // Stored in the engine's own shape (query is the raw object), so readTradeQuery reads it back.
         const value: string = JSON.stringify({ ...data, query: data.query.raw });
-        this.db.prepare('INSERT INTO generator (key, value, created_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, created_at = excluded.created_at')
+        this.db
+            .prepare(
+                'INSERT INTO generator (key, value, created_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, created_at = excluded.created_at',
+            )
             .run(key, value, Date.now());
-        this.db.prepare('DELETE FROM generator WHERE key NOT IN (SELECT key FROM generator ORDER BY created_at DESC LIMIT ?)').run(GENERATOR_KEEP);
+        this.db
+            .prepare('DELETE FROM generator WHERE key NOT IN (SELECT key FROM generator ORDER BY created_at DESC LIMIT ?)')
+            .run(GENERATOR_KEEP);
     }
 
     /** The cached stat list and when it was fetched; undefined when there is none or it doesn't read. */
@@ -144,11 +183,14 @@ export class CacheDb {
     public saveStatList(entries: readonly TradeStatEntry[], fetchedAt: number): void {
         // Stored in the site's own shape so readStatList reads it back.
         const value: string = JSON.stringify({ result: [{ entries: entries }] });
-        this.db.prepare("INSERT INTO trade_stats (key, value, fetched_at) VALUES ('stats', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at")
+        this.db
+            .prepare(
+                "INSERT INTO trade_stats (key, value, fetched_at) VALUES ('stats', ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, fetched_at = excluded.fetched_at",
+            )
             .run(value, fetchedAt);
     }
 
-/** The gear PoB last reported for a build, to show while it loads again (images appear at once). */
+    /** The gear PoB last reported for a build, to show while it loads again (images appear at once). */
     public equipped(buildId: string): readonly EquippedInfo[] | undefined {
         const row: unknown = this.db.prepare('SELECT value FROM equipped WHERE build_id = ?').get(buildId);
         if (!isRecord(row)) {
@@ -163,9 +205,66 @@ export class CacheDb {
     }
 
     public saveEquipped(buildId: string, items: readonly EquippedInfo[]): void {
-        this.db.prepare('INSERT INTO equipped (build_id, value, saved_at) VALUES (?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at')
+        this.db
+            .prepare(
+                'INSERT INTO equipped (build_id, value, saved_at) VALUES (?, ?, ?) ON CONFLICT(build_id) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at',
+            )
             .run(buildId, JSON.stringify(items), Date.now());
-        this.db.prepare('DELETE FROM equipped WHERE build_id NOT IN (SELECT build_id FROM equipped ORDER BY saved_at DESC LIMIT ?)').run(EQUIPPED_KEEP);
+        this.db
+            .prepare('DELETE FROM equipped WHERE build_id NOT IN (SELECT build_id FROM equipped ORDER BY saved_at DESC LIMIT ?)')
+            .run(EQUIPPED_KEEP);
+    }
+
+    /** A build's figures from an earlier load with the same key (summaryKey), if any. */
+    public buildSummary(key: string): BuildSummary | undefined {
+        const row: unknown = this.db.prepare('SELECT value FROM build_summary WHERE key = ?').get(key);
+        if (!isRecord(row)) {
+            return undefined;
+        }
+        try {
+            return readBuildSummary(parseJson(row['value']), 'summary');
+        } catch {
+            this.db.prepare('DELETE FROM build_summary WHERE key = ?').run(key);
+            return undefined;
+        }
+    }
+
+    public saveBuildSummary(key: string, summary: BuildSummary): void {
+        this.db
+            .prepare(
+                'INSERT INTO build_summary (key, value, saved_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at',
+            )
+            .run(key, JSON.stringify(summary), Date.now());
+        this.db
+            .prepare('DELETE FROM build_summary WHERE key NOT IN (SELECT key FROM build_summary ORDER BY saved_at DESC LIMIT ?)')
+            .run(SUMMARY_KEEP);
+    }
+
+    /** The slot data for a PoB version and base type ("Boots"), if cached. */
+    public slotData(pobVersion: string, baseType: string): SlotData | undefined {
+        const version: string = slotDataVersion(pobVersion);
+        const row: unknown = this.db.prepare('SELECT value FROM slot_data WHERE pob_version = ? AND base_type = ?').get(version, baseType);
+        if (!isRecord(row)) {
+            return undefined;
+        }
+        try {
+            const data: SlotData = readSlotData(parseJson(row['value']));
+            return data.baseType === baseType && data.pobVersion === pobVersion ? data : undefined;
+        } catch {
+            this.db.prepare('DELETE FROM slot_data WHERE pob_version = ? AND base_type = ?').run(version, baseType);
+            return undefined;
+        }
+    }
+
+    /** Saves slot data; rows for any other PoB version (or format) are dropped. */
+    public saveSlotData(data: SlotData): void {
+        const version: string = slotDataVersion(data.pobVersion);
+        this.db
+            .prepare(
+                'INSERT INTO slot_data (pob_version, base_type, value, saved_at) VALUES (?, ?, ?, ?) ON CONFLICT(pob_version, base_type) DO UPDATE SET value = excluded.value, saved_at = excluded.saved_at',
+            )
+            .run(version, data.baseType, JSON.stringify(data), Date.now());
+        this.db.prepare('DELETE FROM slot_data WHERE pob_version <> ?').run(version);
     }
 
     /** Forgets every cached generator result (Settings, or after a PoB update). */
@@ -185,7 +284,11 @@ export class CacheDb {
             CREATE TABLE IF NOT EXISTS generator (key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS trade_stats (key TEXT PRIMARY KEY, value TEXT NOT NULL, fetched_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS equipped (build_id TEXT PRIMARY KEY, value TEXT NOT NULL, saved_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS slot_data (pob_version TEXT NOT NULL, base_type TEXT NOT NULL, value TEXT NOT NULL, saved_at INTEGER NOT NULL, PRIMARY KEY (pob_version, base_type));
+            CREATE TABLE IF NOT EXISTS build_summary (key TEXT PRIMARY KEY, value TEXT NOT NULL, saved_at INTEGER NOT NULL);
         `);
-        this.db.prepare("INSERT INTO meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(String(SCHEMA_VERSION));
+        this.db
+            .prepare("INSERT INTO meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")
+            .run(String(SCHEMA_VERSION));
     }
 }

@@ -36,7 +36,8 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
     const req: JsonRecord = parsed;
     const id: unknown = req['id'];
     const reply = (data: unknown): void => send({ id: id, ok: true, data: data, warnings: [] });
-    const fail = (code: string, message: string): void => send({ id: id, ok: false, error: { code: code, message: message }, warnings: [] });
+    const fail = (code: string, message: string): void =>
+        send({ id: id, ok: false, error: { code: code, message: message }, warnings: [] });
     const needsBuild = (): boolean => {
         if (req['buildId'] !== buildId) {
             fail('stale-build', `build ${String(req['buildId'])} is not loaded`);
@@ -56,8 +57,18 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
             }
             buildId = `${buildIdPrefix}${++loads}`;
             send({
-                id: id, ok: true, warnings: [{ code: 'no-damage-target', message: 'reads 0' }],
-                data: { buildId: buildId, pobVersion: 'fake', info: { level: 90 }, skills: {}, target: { kind: 'fullDps', saved: true }, baseline: block(100), equipped: [] },
+                id: id,
+                ok: true,
+                warnings: [{ code: 'no-damage-target', message: 'reads 0' }],
+                data: {
+                    buildId: buildId,
+                    pobVersion: 'fake',
+                    info: { level: 90 },
+                    skills: {},
+                    target: { kind: 'fullDps', saved: true },
+                    baseline: block(100),
+                    equipped: [],
+                },
             });
             return;
         case 'stats':
@@ -79,10 +90,25 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
                     return;
                 }
                 if (items[i] === 'BAD') {
-                    send({ id: id, event: 'item', data: { index: i, ok: false, error: { code: 'parse-failed', message: 'no base type' } } });
+                    send({
+                        id: id,
+                        event: 'item',
+                        data: { index: i, ok: false, error: { code: 'parse-failed', message: 'no base type' } },
+                    });
                     continue;
                 }
-                send({ id: id, event: 'item', data: { index: i, ok: true, item: { name: String(items[i]), base: 'Boots', rarity: 'RARE' }, stats: block(100 + i), unparsed: [], validForSlot: true } });
+                send({
+                    id: id,
+                    event: 'item',
+                    data: {
+                        index: i,
+                        ok: true,
+                        item: { name: String(items[i]), base: 'Boots', rarity: 'RARE' },
+                        stats: block(100 + i),
+                        unparsed: [],
+                        validForSlot: true,
+                    },
+                });
                 if (items[i] === 'SCORE-THEN-CRASH') {
                     setTimeout(() => process.exit(1), 20);
                     return;

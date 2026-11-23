@@ -7,13 +7,35 @@ import { silentLogger } from './logger.ts';
 import type { EngineLogger } from './logger.ts';
 import { EngineProcess } from './process.ts';
 import type { EngineCommand } from './process.ts';
+import { readBaseTypes, readSlotData } from './slotdata.ts';
+import type { BaseTypeInfo, SlotData } from './slotdata.ts';
 import {
-    readLoadBuild, readPing, readScoreItem, readScoreSummary, readStats, readStrip, readTradeQuery, readTradeQueryProgress,
+    readLoadBuild,
+    readPing,
+    readScoreItem,
+    readScoreSummary,
+    readStats,
+    readStrip,
+    readTradeQuery,
+    readTradeQueryProgress,
 } from './protocol.ts';
 import type {
-    CommandName, EngineWarning, FinalMessage, GearSlot, LoadBuildData, PingData, ReadyEvent, ScoreItemResult, StatsData,
-    StreamEvent, StripData, TargetRequest, TradeQueryData, TradeQueryProgress,
+    CommandName,
+    EngineWarning,
+    FinalMessage,
+    GearSlot,
+    LoadBuildData,
+    PingData,
+    ReadyEvent,
+    ScoreItemResult,
+    StatsData,
+    StreamEvent,
+    StripData,
+    TargetRequest,
+    TradeQueryData,
+    TradeQueryProgress,
 } from './protocol.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export interface EngineClientOptions {
     readonly command: EngineCommand;
@@ -63,6 +85,8 @@ const DEFAULT_IDLE_MS: Readonly<Record<CommandName, number>> = {
     strip: 30_000,
     tradeQuery: 60_000,
     score: 30_000,
+    baseTypes: 30_000,
+    slotData: 60_000,
     shutdown: 10_000,
 };
 
@@ -161,12 +185,31 @@ export class EngineClient {
         });
     }
 
+    /** Every PoB item type with bases (Boots, Bow, ...), for picking a base type. Needs no build. */
+    public baseTypes(): Promise<WithWarnings<{ readonly types: readonly BaseTypeInfo[] }>> {
+        return this.serial(async () => {
+            return this.decode(await this.send('baseTypes', {}), readBaseTypes);
+        });
+    }
+
+    /** What can roll on each base of a PoB item type ("Boots", "Bow"), from PoB's mod data. Needs no build. */
+    public slotData(baseType: string): Promise<WithWarnings<SlotData>> {
+        return this.serial(async () => {
+            return this.decode(await this.send('slotData', { baseType: baseType }), readSlotData);
+        });
+    }
+
     /**
      * Scores item texts in the slot, calling onItem once per item in order (index = position in `items`).
      * If the worker dies or hangs, the item it was on is reported as failed, the worker is restarted with
      * the same build, and scoring carries on with the next item.
      */
-    public score(slot: GearSlot, items: readonly string[], onItem: (result: ScoreItemResult) => void, options: ScoreOptions = {}): Promise<ScoreSummary> {
+    public score(
+        slot: GearSlot,
+        items: readonly string[],
+        onItem: (result: ScoreItemResult) => void,
+        options: ScoreOptions = {},
+    ): Promise<ScoreSummary> {
         return this.serial(async () => {
             const started: number = Date.now();
             const batchSize: number = Math.max(1, options.batchSize ?? 10);
@@ -179,7 +222,11 @@ export class EngineClient {
                     scored++;
                 } else {
                     failed++;
-                    this.logger.log('warn', 'item failed to score', { index: result.index, error: result.error, text: items[result.index] });
+                    this.logger.log('warn', 'item failed to score', {
+                        index: result.index,
+                        error: result.error,
+                        text: items[result.index],
+                    });
                 }
                 onItem(result);
             };
@@ -191,17 +238,21 @@ export class EngineClient {
                 const batch: readonly string[] = items.slice(offset, offset + batchSize);
                 let reported: number = 0;
                 try {
-                    const final: FinalMessage = await this.sendForBuild('score', { ...calcArgs(options), slot: slot, items: batch }, (event: StreamEvent) => {
-                        if (event.event !== 'item') {
-                            return;
-                        }
-                        const result: ScoreItemResult = readScoreItem(event.data);
-                        if (result.index !== reported) {
-                            throw new EngineError('protocol', `score item ${result.index} arrived when ${reported} was expected`);
-                        }
-                        reported++;
-                        report({ ...result, index: offset + result.index });
-                    });
+                    const final: FinalMessage = await this.sendForBuild(
+                        'score',
+                        { ...calcArgs(options), slot: slot, items: batch },
+                        (event: StreamEvent) => {
+                            if (event.event !== 'item') {
+                                return;
+                            }
+                            const result: ScoreItemResult = readScoreItem(event.data);
+                            if (result.index !== reported) {
+                                throw new EngineError('protocol', `score item ${result.index} arrived when ${reported} was expected`);
+                            }
+                            reported++;
+                            report({ ...result, index: offset + result.index });
+                        },
+                    );
                     this.decode(final, readScoreSummary);
                     if (reported !== batch.length) {
                         throw new EngineError('protocol', `score returned ${reported} of ${batch.length} items`);
@@ -227,8 +278,13 @@ export class EngineClient {
                 }
             }
             return {
-                count: items.length, scored: scored, failed: failed, skipped: items.length - next,
-                cancelled: next < items.length, restarts: restarts, seconds: (Date.now() - started) / 1000,
+                count: items.length,
+                scored: scored,
+                failed: failed,
+                skipped: items.length - next,
+                cancelled: next < items.length,
+                restarts: restarts,
+                seconds: (Date.now() - started) / 1000,
             };
         });
     }
@@ -245,7 +301,7 @@ export class EngineClient {
             try {
                 await worker.request('shutdown', {}, this.idleMs.shutdown, () => undefined);
             } catch (error: unknown) {
-                this.logger.log('warn', 'engine shutdown failed', { error: error instanceof Error ? error.message : String(error) });
+                this.logger.log('warn', 'engine shutdown failed', { error: messageOf(error) });
             }
             await worker.waitForExit(this.idleMs.shutdown);
         });
@@ -285,7 +341,11 @@ export class EngineClient {
         return worker;
     }
 
-    private async send(cmd: CommandName, args: Readonly<Record<string, unknown>>, onEvent?: (event: StreamEvent) => void): Promise<FinalMessage> {
+    private async send(
+        cmd: CommandName,
+        args: Readonly<Record<string, unknown>>,
+        onEvent?: (event: StreamEvent) => void,
+    ): Promise<FinalMessage> {
         const worker: EngineProcess = await this.ensureWorker();
         this.logger.log('debug', `engine ${cmd}`, { pid: worker.pid });
         return worker.request(cmd, args, this.idleMs[cmd], onEvent ?? ((): void => undefined));
@@ -300,7 +360,11 @@ export class EngineClient {
         return this.decode(await this.send('loadBuild', args), readLoadBuild);
     }
 
-    private async sendForBuild(cmd: CommandName, args: Readonly<Record<string, unknown>>, onEvent?: (event: StreamEvent) => void): Promise<FinalMessage> {
+    private async sendForBuild(
+        cmd: CommandName,
+        args: Readonly<Record<string, unknown>>,
+        onEvent?: (event: StreamEvent) => void,
+    ): Promise<FinalMessage> {
         if (!this.build) {
             throw new EngineError('no-build', `${cmd} needs a loaded build`);
         }
@@ -311,7 +375,10 @@ export class EngineClient {
 
     private decode<T>(final: FinalMessage, read: (data: unknown) => T): WithWarnings<T> {
         if (!final.ok) {
-            const error: { readonly code: string; readonly message: string } = final.error ?? { code: 'protocol', message: 'failed with no error' };
+            const error: { readonly code: string; readonly message: string } = final.error ?? {
+                code: 'protocol',
+                message: 'failed with no error',
+            };
             throw new EngineError(error.code, error.message, final.warnings);
         }
         return { ...read(final.data), warnings: final.warnings };

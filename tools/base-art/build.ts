@@ -9,21 +9,41 @@
 import { readFileSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { isRecord } from '@poe-upgrade-finder/validate';
 
 /** Item classes the gear layout shows (no flasks, jewels or gems: out of scope). */
 const CLASSES: ReadonlySet<string> = new Set<string>([
-    'Helmet', 'Body Armour', 'Gloves', 'Boots', 'Amulet', 'Ring', 'Belt', 'Shield', 'Quiver',
-    'Wand', 'Dagger', 'Rune Dagger', 'Claw', 'One Hand Axe', 'One Hand Sword', 'Thrusting One Hand Sword', 'One Hand Mace', 'Sceptre',
-    'Bow', 'Staff', 'Warstaff', 'Two Hand Axe', 'Two Hand Sword', 'Two Hand Mace', 'FishingRod', 'Trinket',
+    'Helmet',
+    'Body Armour',
+    'Gloves',
+    'Boots',
+    'Amulet',
+    'Ring',
+    'Belt',
+    'Shield',
+    'Quiver',
+    'Wand',
+    'Dagger',
+    'Rune Dagger',
+    'Claw',
+    'One Hand Axe',
+    'One Hand Sword',
+    'Thrusting One Hand Sword',
+    'One Hand Mace',
+    'Sceptre',
+    'Bow',
+    'Staff',
+    'Warstaff',
+    'Two Hand Axe',
+    'Two Hand Sword',
+    'Two Hand Mace',
+    'FishingRod',
+    'Trinket',
 ]);
 
 const PREFIX: string = 'Art/2DItems/';
 
 type Entry = readonly [path: string, width: number, height: number];
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-    return typeof value === 'object' && value !== null && !Array.isArray(value);
-}
 
 /** art path and cells from a RePoE entry, or undefined. */
 function entryOf(value: Record<string, unknown>): Entry | undefined {

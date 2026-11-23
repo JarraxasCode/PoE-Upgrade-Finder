@@ -81,7 +81,10 @@ export function junkFilter(items: readonly EvaluatedItem[], minGainPct: number =
             if (priceOf(other) >= priceOf(row)) {
                 break;
             }
-            if (other.evaluated.gain.gain > row.evaluated.gain.gain && (winner === undefined || other.evaluated.gain.gain > winner.gain.gain)) {
+            if (
+                other.evaluated.gain.gain > row.evaluated.gain.gain &&
+                (winner === undefined || other.evaluated.gain.gain > winner.gain.gain)
+            ) {
                 winner = other.evaluated;
             }
         }

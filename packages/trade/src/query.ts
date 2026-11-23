@@ -32,13 +32,21 @@ export interface PriceFilter {
 }
 
 export interface SearchFilters {
-    readonly type_filters: { readonly filters: { readonly category: { readonly option: string }; readonly rarity: { readonly option: string } } };
+    readonly type_filters: {
+        readonly filters: { readonly category: { readonly option: string }; readonly rarity: { readonly option: string } };
+    };
+    /** The item's defences (slot plan, issue #24): ar, ev, es, ward. */
+    readonly armour_filters?: { readonly filters: Readonly<Record<string, { readonly min?: number; readonly max?: number }>> };
     readonly req_filters?: { readonly filters: { readonly lvl?: { readonly max: number } } };
     readonly trade_filters: { readonly filters: { readonly price: PriceFilter } };
+    /** Influence filters (slot plan, Phase 6), e.g. `{ shaper_item: { option: 'true' } }`. */
+    readonly misc_filters?: { readonly filters: Readonly<Record<string, { readonly option: 'true' }>> };
 }
 
 export interface SearchQuery {
     readonly status: { readonly option: ListingStatus };
+    /** One base, the site's name for it (V24: PoB's name without the bracketed variant). */
+    readonly type?: string;
     readonly stats: readonly StatGroup[];
     readonly filters: SearchFilters;
 }

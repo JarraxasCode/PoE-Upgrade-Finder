@@ -185,18 +185,27 @@ export class TradeClient {
         let lastError: TradeError | undefined;
         for (let attempt: number = 1; attempt <= 2; attempt++) {
             const started: number = this.now();
-            const outcome: HttpOutcome = await this.limiter.schedule(spec.policy, spec.path, async (): Promise<HttpOutcome> => {
-                const sent: HttpOutcome = await this.transport.send({
-                    method: spec.method,
-                    url: this.origin + spec.path,
-                    headers: { Accept: 'application/json' },
-                    body: bodyText,
-                    timeoutMs: this.timeoutMs,
-                    signal: spec.signal,
-                });
-                this.limiter.update(spec.policy, sent.kind === 'response' ? sent.headers : {}, sent.kind === 'response' ? sent.status : 0);
-                return sent;
-            }, spec.signal);
+            const outcome: HttpOutcome = await this.limiter.schedule(
+                spec.policy,
+                spec.path,
+                async (): Promise<HttpOutcome> => {
+                    const sent: HttpOutcome = await this.transport.send({
+                        method: spec.method,
+                        url: this.origin + spec.path,
+                        headers: { Accept: 'application/json' },
+                        body: bodyText,
+                        timeoutMs: this.timeoutMs,
+                        signal: spec.signal,
+                    });
+                    this.limiter.update(
+                        spec.policy,
+                        sent.kind === 'response' ? sent.headers : {},
+                        sent.kind === 'response' ? sent.status : 0,
+                    );
+                    return sent;
+                },
+                spec.signal,
+            );
             const base: Record<string, unknown> = {
                 reqId: reqId,
                 policy: spec.policy,
@@ -213,8 +222,16 @@ export class TradeClient {
             if (outcome.kind !== 'response') {
                 const code: TradeErrorCode = outcome.kind === 'redirect' ? 'redirect' : outcome.kind === 'timeout' ? 'timeout' : 'network';
                 const message: string =
-                    outcome.kind === 'redirect' ? `redirected to ${new URL(outcome.location, this.origin).pathname}` : outcome.kind === 'timeout' ? 'timed out' : outcome.message;
-                this.logger.log('warn', `${spec.method} ${spec.path} -> ${code}`, { ...base, error: message, status: outcome.kind === 'redirect' ? outcome.status : null });
+                    outcome.kind === 'redirect'
+                        ? `redirected to ${new URL(outcome.location, this.origin).pathname}`
+                        : outcome.kind === 'timeout'
+                          ? 'timed out'
+                          : outcome.message;
+                this.logger.log('warn', `${spec.method} ${spec.path} -> ${code}`, {
+                    ...base,
+                    error: message,
+                    status: outcome.kind === 'redirect' ? outcome.status : null,
+                });
                 lastError = new TradeError(code, `${spec.policy}: ${message}`, outcome.kind === 'redirect' ? outcome.status : undefined);
                 if (code === 'redirect') {
                     throw lastError;
@@ -262,7 +279,11 @@ export class TradeClient {
         }
         if (rate !== undefined && this.signedInState === false) {
             this.logger.log('warn', `${spec.method} ${spec.path} -> signed out`, data);
-            return new TradeError('signed-out', 'Not signed in ("Account" is missing from the rate-limit rules). Sign in again in the app window.', outcome.status);
+            return new TradeError(
+                'signed-out',
+                'Not signed in ("Account" is missing from the rate-limit rules). Sign in again in the app window.',
+                outcome.status,
+            );
         }
         if (outcome.status === 200 && siteError === undefined) {
             try {

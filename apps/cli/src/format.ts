@@ -2,11 +2,14 @@ import type { Price } from './listings.ts';
 
 /** A plain text table; `right[i]` right-aligns column i. */
 export function table(headers: readonly string[], rows: readonly (readonly string[])[], right: readonly boolean[]): string {
-    const widths: number[] = headers.map((h: string, i: number) => Math.max(h.length, ...rows.map((r: readonly string[]) => (r[i] ?? '').length)));
-    const line = (cells: readonly string[]): string => cells
-        .map((c: string, i: number) => (right[i] ? c.padStart(widths[i] ?? 0) : c.padEnd(widths[i] ?? 0)))
-        .join('  ')
-        .trimEnd();
+    const widths: number[] = headers.map((h: string, i: number) =>
+        Math.max(h.length, ...rows.map((r: readonly string[]) => (r[i] ?? '').length)),
+    );
+    const line = (cells: readonly string[]): string =>
+        cells
+            .map((c: string, i: number) => (right[i] ? c.padStart(widths[i] ?? 0) : c.padEnd(widths[i] ?? 0)))
+            .join('  ')
+            .trimEnd();
     return `${[line(headers), line(widths.map((w: number) => '-'.repeat(w))), ...rows.map(line)].join('\n')}\n`;
 }
 

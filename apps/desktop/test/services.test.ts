@@ -6,7 +6,7 @@ import { after, test } from 'node:test';
 import { DEFAULT_FLOORS } from '@poe-upgrade-finder/core';
 import { GEAR_SLOTS as ENGINE_SLOTS } from '@poe-upgrade-finder/engine-client';
 import type { LoadBuildData, SocketGroupInfo } from '@poe-upgrade-finder/engine-client';
-import { GEAR_SLOTS, readBuildSettings, readFloors } from '@poe-upgrade-finder/ipc';
+import { GEAR_SLOTS, readBuildSettings, readFloors, readLevelFilter } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { buildSummary, targetOptions } from '../src/services/build-summary.ts';
 import { buildEntryFromHead, buildFilePath, listBuilds, resolveBuildsDir, xmlAttribute } from '../src/services/pob-builds.ts';
@@ -36,6 +36,23 @@ test('the ipc mirrors match core and the engine', () => {
     assert.deepEqual(readBuildSettings(defaultBuildSettings(), 's'), defaultBuildSettings());
 });
 
+test('the level filter: older settings read as up to the character; levels are whole numbers 1 to 100 (issue #22)', () => {
+    const { levelFilter: _none, ...older } = defaultBuildSettings();
+    assert.deepEqual(readBuildSettings(older, 's').levelFilter, { kind: 'character' });
+    assert.deepEqual(readLevelFilter({ kind: 'max', level: 90 }, 'l'), { kind: 'max', level: 90 });
+    assert.deepEqual(readLevelFilter({ kind: 'off' }, 'l'), { kind: 'off' });
+    for (const bad of [
+        { kind: 'max' },
+        { kind: 'max', level: 0 },
+        { kind: 'max', level: 101 },
+        { kind: 'max', level: 9.5 },
+        { kind: 'off', level: 3 },
+        { kind: 'all' },
+    ]) {
+        assert.throws(() => readLevelFilter(bad, 'l'), JSON.stringify(bad));
+    }
+});
+
 test('xml attributes: first element, entities decoded', () => {
     assert.equal(xmlAttribute('<Misc a="1" buildPath="C:\\B &amp; C"/>', 'Misc', 'buildPath'), 'C:\\B & C');
     assert.equal(xmlAttribute('<Misc a="1"/>', 'Misc', 'buildPath'), undefined);
@@ -46,7 +63,10 @@ test('the Builds folder: override, then PoB Settings.xml, then the default', () 
     const docs: string = join(root, 'docs1');
     assert.deepEqual(resolveBuildsDir(docs, null), { dir: join(docs, 'Path of Building', 'Builds'), source: 'pob-default' });
     mkdirSync(join(docs, 'Path of Building'), { recursive: true });
-    writeFileSync(join(docs, 'Path of Building', 'Settings.xml'), `<PathOfBuilding><Misc buildSortMode="NAME" buildPath="${join(root, 'custom')}"/></PathOfBuilding>`);
+    writeFileSync(
+        join(docs, 'Path of Building', 'Settings.xml'),
+        `<PathOfBuilding><Misc buildSortMode="NAME" buildPath="${join(root, 'custom')}"/></PathOfBuilding>`,
+    );
     assert.deepEqual(resolveBuildsDir(docs, null), { dir: join(root, 'custom'), source: 'pob-settings' });
     assert.deepEqual(resolveBuildsDir(docs, join(root, 'mine')), { dir: join(root, 'mine'), source: 'override' });
 });
@@ -54,7 +74,13 @@ test('the Builds folder: override, then PoB Settings.xml, then the default', () 
 test('build entries from the save header; non-PoB XML is skipped', () => {
     const head: string = '<PathOfBuilding><Build ascendClassName="Chieftain" className="Marauder" level="94" targetVersion="3_0">';
     assert.deepEqual(buildEntryFromHead('Covens/Example RF.xml', head, 5), {
-        id: 'Covens/Example RF.xml', name: 'Example RF', folder: 'Covens', className: 'Marauder', ascendClassName: 'Chieftain', level: 94, modifiedMs: 5,
+        id: 'Covens/Example RF.xml',
+        name: 'Example RF',
+        folder: 'Covens',
+        className: 'Marauder',
+        ascendClassName: 'Chieftain',
+        level: 94,
+        modifiedMs: 5,
     });
     assert.equal(buildEntryFromHead('x.xml', '<root/>', 0), undefined);
     assert.equal(buildEntryFromHead('x.xml', '<PathOfBuilding><Build ascendClassName="None" className="Witch">', 0)?.ascendClassName, null);
@@ -69,7 +95,10 @@ test('listing: sub-folders, newest first, junk left out; a missing folder says s
     writeFileSync(join(dir, 'other.xml'), '<settings/>');
     const list = listBuilds({ dir: dir, source: 'override' });
     assert.equal(list.error, null);
-    assert.deepEqual(list.builds.map((b) => b.id), ['League/New.xml', 'Old.xml']);
+    assert.deepEqual(
+        list.builds.map((b) => b.id),
+        ['League/New.xml', 'Old.xml'],
+    );
     const missing = listBuilds({ dir: join(root, 'nope'), source: 'pob-default' });
     assert.equal(missing.builds.length, 0);
     assert.match(missing.error ?? '', /wasn't found/);
@@ -111,7 +140,12 @@ test('settings file names: readable, distinct per folder', () => {
     assert.match(buildSettingsFileName('x/<bad>:name?.xml'), /^_bad_name_-/);
 });
 
-function group(index: number, name: string, skills: { name: string; parts?: string[]; minion?: string }[], extra: Partial<SocketGroupInfo> = {}): SocketGroupInfo {
+function group(
+    index: number,
+    name: string,
+    skills: { name: string; parts?: string[]; minion?: string }[],
+    extra: Partial<SocketGroupInfo> = {},
+): SocketGroupInfo {
     return {
         index: index,
         name: name,
@@ -132,7 +166,14 @@ test('damage targets: saved, Full DPS with the ticked groups, each skill and par
         group(4, '', [{ name: 'Herald of Ash' }], { enabled: false }),
         group(5, '', [{ name: 'Righteous Fire' }], { slot: 'Helmet' }),
     ];
-    const options = targetOptions(skills, { kind: 'skill', saved: true, group: 1, activeSkill: 1, part: undefined, name: 'Righteous Fire' });
+    const options = targetOptions(skills, {
+        kind: 'skill',
+        saved: true,
+        group: 1,
+        activeSkill: 1,
+        part: undefined,
+        name: 'Righteous Fire',
+    });
     assert.deepEqual(options, [
         { id: 'saved', label: 'As saved in PoB: Righteous Fire' },
         { id: 'full', label: 'Full DPS: Righteous Fire + Fire Trap' },
@@ -154,7 +195,16 @@ test('the summary warns when the damage target reads 0', () => {
         baseline: { damage: 0, values: { TotalEHP: 50_000, Life: 4_000 }, skillDps: undefined },
         equipped: [],
     };
-    const s = buildSummary({ buildId: 'x.xml', load: load, targetId: 'saved', target: load.target, stats: load.baseline, warnings: [{ code: 'w', message: 'from PoB' }], fileModifiedMs: 1, art: () => undefined });
+    const s = buildSummary({
+        buildId: 'x.xml',
+        load: load,
+        targetId: 'saved',
+        target: load.target,
+        stats: load.baseline,
+        warnings: [{ code: 'w', message: 'from PoB' }],
+        fileModifiedMs: 1,
+        art: () => undefined,
+    });
     assert.equal(s.ascendClassName, null);
     assert.equal(s.ehp, 50_000);
     assert.equal(s.targetLabel, 'Full DPS');

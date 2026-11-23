@@ -15,7 +15,12 @@ interface Shown {
     readonly min: number;
 }
 
-const plain = (key: string, label: string, unit: '' | '%' = '', min: number = 1): Shown => ({ label: label, read: (s: PobStats) => stat(s, key), unit: unit, min: min });
+const plain = (key: string, label: string, unit: '' | '%' = '', min: number = 1): Shown => ({
+    label: label,
+    read: (s: PobStats) => stat(s, key),
+    unit: unit,
+    min: min,
+});
 
 function maxResOf(element: string): (s: PobStats) => number | undefined {
     return (s: PobStats): number | undefined => {
@@ -46,7 +51,15 @@ const SHOWN: readonly Shown[] = [
     plain('BlockChance', 'Block', '%'),
     plain('SpellBlockChance', 'Spell block', '%'),
     plain('SpellSuppressionChance', 'Spell suppression', '%'),
-    { label: 'Movement speed', read: (s: PobStats) => { const v: number | undefined = stat(s, 'EffectiveMovementSpeedMod'); return v === undefined ? undefined : v * 100; }, unit: '%', min: 1 },
+    {
+        label: 'Movement speed',
+        read: (s: PobStats) => {
+            const v: number | undefined = stat(s, 'EffectiveMovementSpeedMod');
+            return v === undefined ? undefined : v * 100;
+        },
+        unit: '%',
+        min: 1,
+    },
     plain('LifeRegenRecovery', 'Life regen /s', '', 1),
 ];
 

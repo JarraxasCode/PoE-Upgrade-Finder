@@ -3,7 +3,7 @@
 
 import { createHash } from 'node:crypto';
 import { join } from 'node:path';
-import { DEFAULT_BLEND, DEFAULT_FLOORS, DEFAULT_MIN_GAIN_PCT } from '@poe-upgrade-finder/core';
+import { DEFAULT_BLEND, DEFAULT_FLOORS, DEFAULT_LEVEL_FILTER, DEFAULT_MIN_GAIN_PCT } from '@poe-upgrade-finder/core';
 import { readAppSettings, readBuildSettings } from '@poe-upgrade-finder/ipc';
 import type { AppSettings, BuildSettings } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
@@ -11,10 +11,27 @@ import { readJsonFile, writeJsonFile } from './json-file.ts';
 
 export const DEFAULT_LEAGUE: string = 'Covens';
 
-export const DEFAULT_APP_SETTINGS: AppSettings = { league: DEFAULT_LEAGUE, listing: 'securable', depth: 'thorough', buildsDir: null, debug: false };
+export const DEFAULT_APP_SETTINGS: AppSettings = {
+    league: DEFAULT_LEAGUE,
+    listing: 'securable',
+    depth: 'thorough',
+    buildsDir: null,
+    debug: false,
+};
 
 export function defaultBuildSettings(): BuildSettings {
-    return { floors: DEFAULT_FLOORS, blend: DEFAULT_BLEND, minGainPct: DEFAULT_MIN_GAIN_PCT, lastSlot: null, lastBudget: null, lastMinBudget: null, lastTarget: null, weightEdits: {} };
+    return {
+        floors: DEFAULT_FLOORS,
+        blend: DEFAULT_BLEND,
+        minGainPct: DEFAULT_MIN_GAIN_PCT,
+        lastSlot: null,
+        lastBudget: null,
+        lastMinBudget: null,
+        lastTarget: null,
+        slotPlans: {},
+        weightEdits: {},
+        levelFilter: DEFAULT_LEVEL_FILTER,
+    };
 }
 
 /**
@@ -23,7 +40,11 @@ export function defaultBuildSettings(): BuildSettings {
  */
 export function buildSettingsFileName(buildId: string): string {
     const base: string = (buildId.split('/').pop() ?? buildId).replace(/\.xml$/i, '');
-    const safe: string = base.replace(/[^A-Za-z0-9 _.-]+/g, '_').trim().slice(0, 60) || 'build';
+    const safe: string =
+        base
+            .replace(/[^A-Za-z0-9 _.-]+/g, '_')
+            .trim()
+            .slice(0, 60) || 'build';
     const hash: string = createHash('sha1').update(buildId.toLowerCase()).digest('hex').slice(0, 10);
     return `${safe}-${hash}.json`;
 }

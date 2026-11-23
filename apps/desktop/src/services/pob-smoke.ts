@@ -17,7 +17,18 @@ import {
 } from '@poe-upgrade-finder/engine-client';
 import type { Logger } from '@poe-upgrade-finder/logging';
 
-const SLOTS: readonly GearSlot[] = ['Boots', 'Gloves', 'Helmet', 'Body Armour', 'Belt', 'Amulet', 'Ring 1', 'Ring 2', 'Weapon 2', 'Weapon 1'];
+const SLOTS: readonly GearSlot[] = [
+    'Boots',
+    'Gloves',
+    'Helmet',
+    'Body Armour',
+    'Belt',
+    'Amulet',
+    'Ring 1',
+    'Ring 2',
+    'Weapon 2',
+    'Weapon 1',
+];
 
 function isSlot(value: string): value is GearSlot {
     return (SLOTS as readonly string[]).includes(value);
@@ -46,7 +57,11 @@ export function differingKeys(a: StatBlock, b: StatBlock): readonly string[] {
  * Throws with a reason when the staged copy fails; returns a one-line note when it passes. With no build
  * loaded, it only checks that PoB starts.
  */
-export async function pobSmokeCheck(pobDir: string, build: { readonly file: string; readonly baseline: StatBlock } | undefined, logger: Logger): Promise<string> {
+export async function pobSmokeCheck(
+    pobDir: string,
+    build: { readonly file: string; readonly baseline: StatBlock } | undefined,
+    logger: Logger,
+): Promise<string> {
     const client: EngineClient = new EngineClient({ command: luahostCommand(resolveEnginePaths(pobDir)), logger: logger });
     try {
         if (build === undefined) {

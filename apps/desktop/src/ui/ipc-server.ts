@@ -7,14 +7,12 @@ import type { IpcMainInvokeEvent, WebContents } from 'electron';
 import { EVENT_CHANNEL, INVOKE_CHANNEL, parseInvokeRequest } from '@poe-upgrade-finder/ipc';
 import type { InvokeRequest, InvokeResponse, MainEvent, MethodName, Params, Result } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
-import { ValidationError } from '@poe-upgrade-finder/validate';
+import { messageOf, ValidationError } from '@poe-upgrade-finder/validate';
+import { UserFacingError } from './user-facing-error.ts';
 
 export type Handlers = { readonly [M in MethodName]: (params: Params<M>) => Promise<Result<M>> };
 
-/** A handler error the user should see as it is (no stack, no "failed:" prefix). */
-export class UserFacingError extends Error {
-    public override readonly name: string = 'UserFacingError';
-}
+export { UserFacingError } from './user-facing-error.ts';
 
 function run<M extends MethodName>(handlers: Handlers, request: InvokeRequest<M>): Promise<Result<M>> {
     const handler: (params: Params<M>) => Promise<Result<M>> = handlers[request.method];
@@ -25,7 +23,12 @@ function run<M extends MethodName>(handlers: Handlers, request: InvokeRequest<M>
  * Serves the invoke channel. `isTrusted` says whether a sender is our own window (only the main window's
  * top frame, loaded from our files, may call; the sign-in window never can).
  */
-export function serveIpc(handlers: Handlers, isTrusted: (event: IpcMainInvokeEvent) => boolean, logger: Logger, onRefused?: (message: string) => void): () => void {
+export function serveIpc(
+    handlers: Handlers,
+    isTrusted: (event: IpcMainInvokeEvent) => boolean,
+    logger: Logger,
+    onRefused?: (message: string) => void,
+): () => void {
     ipcMain.handle(INVOKE_CHANNEL, async (event: IpcMainInvokeEvent, raw: unknown): Promise<InvokeResponse> => {
         if (!isTrusted(event)) {
             logger.log('warn', 'IPC from an untrusted sender refused', { url: event.senderFrame?.url ?? null });
@@ -47,10 +50,10 @@ export function serveIpc(handlers: Handlers, isTrusted: (event: IpcMainInvokeEve
             logger.log('debug', `ipc ${request.method}`, { ms: Date.now() - started });
             return { ok: true, result: result };
         } catch (error: unknown) {
-            const message: string = error instanceof Error ? error.message : String(error);
+            const message: string = messageOf(error);
             logger.log(error instanceof UserFacingError ? 'warn' : 'error', `ipc ${request.method} failed`, {
                 message: message,
-                stack: error instanceof Error && !(error instanceof UserFacingError) ? error.stack ?? null : null,
+                stack: error instanceof Error && !(error instanceof UserFacingError) ? (error.stack ?? null) : null,
             });
             return { ok: false, error: { code: 'failed', message: message } };
         }

@@ -4,7 +4,7 @@
 
 import { array, boolean, isRecord, number, optional, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
-import { readItemDisplay } from './item-display.ts';
+import { readItemDisplay, stripMarkup } from './item-display.ts';
 import type { ItemDisplay } from './item-display.ts';
 
 export interface SearchResponse {
@@ -49,8 +49,26 @@ export interface TradeListing {
      * the like, not implicit (the base gives those). Buy links require them to pin the listing down.
      */
     readonly statIds: readonly string[];
+    /**
+     * Every mod line with its trade stat id, implicits included (issue #6: which lines met an include).
+     * Empty when the response doesn't tie lines to stats.
+     */
+    readonly statLines: readonly StatLine[];
     /** What a tooltip shows (image, properties, mod groups); best effort, never fails the listing. */
     readonly display: ItemDisplay;
+}
+
+/** The kinds of mod line a StatLine can be. */
+export type StatLineKind = 'implicit' | 'explicit' | 'crafted' | 'fractured' | 'scourge' | 'crucible' | 'enchant';
+export const STAT_LINE_KINDS: readonly StatLineKind[] = ['implicit', 'explicit', 'crafted', 'fractured', 'scourge', 'crucible', 'enchant'];
+
+/** One mod line on a listed item, tied to its trade stat. */
+export interface StatLine {
+    /** The site's stat id with the line's kind, e.g. "crafted.stat_2250533757". */
+    readonly statId: string;
+    readonly kind: StatLineKind;
+    /** The line as shown, markup removed ("+14% to Item Rarity"). */
+    readonly text: string;
 }
 
 export interface FetchResponse {
@@ -76,7 +94,10 @@ function decodeText(encoded: string): string {
 
 /** Removes a trailing "--------\nNote: ..." section and trailing blank lines. */
 export function stripNote(text: string): string {
-    return text.replace(/\n+$/, '').replace(/(?:\n--------\nNote: [^\n]*)+$/, '').replace(/\n+$/, '');
+    return text
+        .replace(/\n+$/, '')
+        .replace(/(?:\n--------\nNote: [^\n]*)+$/, '')
+        .replace(/\n+$/, '');
 }
 
 /** Kinds of mod line that belong to the item itself rather than its base. */
@@ -100,6 +121,50 @@ function readStatIds(value: unknown): string[] {
         }
     }
     return ids;
+}
+
+function isStatLineKind(value: string): value is StatLineKind {
+    return (STAT_LINE_KINDS as readonly string[]).includes(value);
+}
+
+/**
+ * Each mod line with its stat. The signed-in site tags every line object with its own hash
+ * ("stat.explicit.stat_X"); the public format has plain strings, matched to item.extended.hashes[kind] by
+ * position (one entry per line), and only when the counts agree. Anything else is left out.
+ */
+function readStatLines(item: JsonRecord, hashes: unknown): StatLine[] {
+    const out: StatLine[] = [];
+    for (const kind of STAT_LINE_KINDS) {
+        const mods: unknown = item[`${kind}Mods`];
+        if (!Array.isArray(mods)) {
+            continue;
+        }
+        const byPosition: unknown = isRecord(hashes) ? hashes[kind] : undefined;
+        const positional: readonly unknown[] = Array.isArray(byPosition) && byPosition.length === mods.length ? byPosition : [];
+        mods.forEach((m: unknown, k: number) => {
+            let text: string | undefined;
+            let statId: string | undefined;
+            let lineKind: StatLineKind = kind;
+            if (isRecord(m)) {
+                text = typeof m['description'] === 'string' ? m['description'] : undefined;
+                const hash: unknown = m['hash'];
+                statId = typeof hash === 'string' ? hash.replace(/^stat\./, '') : undefined;
+                const domain: unknown = m['domain'];
+                if (typeof domain === 'string' && isStatLineKind(domain)) {
+                    lineKind = domain;
+                }
+            } else if (typeof m === 'string') {
+                text = m;
+                const entry: unknown = positional[k];
+                const id: unknown = Array.isArray(entry) ? entry[0] : undefined;
+                statId = typeof id === 'string' ? id : undefined;
+            }
+            if (text !== undefined && statId !== undefined && /^[a-z]+\.stat_\d+$/.test(statId)) {
+                out.push({ statId: statId, kind: lineKind, text: stripMarkup(text).replace(/\n/g, ' / ') });
+            }
+        });
+    }
+    return out;
 }
 
 function readPrice(value: unknown, path: string): ListingPrice | undefined {
@@ -134,6 +199,7 @@ export function readListing(value: unknown, path: string): TradeListing {
         indexed: optional(listing['indexed'], `${path}.listing.indexed`, string),
         seller: isRecord(account) ? optional(account['name'], `${path}.listing.account.name`, string) : undefined,
         statIds: readStatIds(extended['hashes']),
+        statLines: readStatLines(item, extended['hashes']),
         display: readItemDisplay(item),
     };
 }

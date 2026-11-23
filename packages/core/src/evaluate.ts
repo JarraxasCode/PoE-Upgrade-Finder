@@ -5,6 +5,9 @@ import { gainOf } from './gain.ts';
 import type { Gain } from './gain.ts';
 import type { CheckResult, ItemCheck, ItemNote, ListedItem, ScoredStats, SlotSearchSpec } from './spec.ts';
 import type { PobStats } from './stats.ts';
+import { matchPlan } from './plan-match.ts';
+import type { PlanMatch } from './plan-match.ts';
+import type { DisplayLine } from '@poe-upgrade-finder/trade';
 
 export interface EvaluatedItem {
     readonly item: ListedItem;
@@ -19,9 +22,17 @@ export interface EvaluatedItem {
     readonly missedTargets: readonly CheckResult[];
     /** Flags raised (life loss, net regen negative). */
     readonly flags: readonly CheckResult[];
+    /** Which lines met each requirement, and the exclusions and defences (issue #6); empty lists without any. */
+    readonly plan: PlanMatch;
 }
 
-export function evaluateItem(spec: SlotSearchSpec, baseline: PobStats, item: ListedItem, scored: ScoredStats, blend: number): EvaluatedItem {
+export function evaluateItem(
+    spec: SlotSearchSpec,
+    baseline: PobStats,
+    item: ListedItem,
+    scored: ScoredStats,
+    blend: number,
+): EvaluatedItem {
     const checks: CheckResult[] = spec.checks.map((c: ItemCheck) => c.evaluate(baseline, scored.stats));
     const notes: ItemNote[] = [];
     for (const noter of spec.noters) {
@@ -39,5 +50,9 @@ export function evaluateItem(spec: SlotSearchSpec, baseline: PobStats, item: Lis
         failedFloors: failedFloors,
         missedTargets: failed('target'),
         flags: failed('flag'),
+        plan: matchPlan(spec, {
+            statLines: item.statLines,
+            properties: item.display?.properties.map((line: DisplayLine) => line.map((p) => p.text).join('')),
+        }),
     };
 }

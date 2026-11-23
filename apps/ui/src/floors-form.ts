@@ -30,7 +30,11 @@ export function setBool(f: FloorSettings, key: BoolFloor, value: boolean): Floor
     return out;
 }
 
-function withElement(map: Readonly<Partial<Record<Element, number>>> | undefined, el: Element, value: number | undefined): Partial<Record<Element, number>> | undefined {
+function withElement(
+    map: Readonly<Partial<Record<Element, number>>> | undefined,
+    el: Element,
+    value: number | undefined,
+): Partial<Record<Element, number>> | undefined {
     const next: Partial<Record<Element, number>> = { ...map };
     if (value === undefined) {
         delete next[el];

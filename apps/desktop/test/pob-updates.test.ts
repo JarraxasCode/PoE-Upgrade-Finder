@@ -67,7 +67,13 @@ function fakeSource(latest: string): PobSource & { asked: string[] } {
     };
 }
 
-function setup(latest: string): { updates: PobUpdates; bundled: string; root: string; states: PobUpdateState[]; source: ReturnType<typeof fakeSource> } {
+function setup(latest: string): {
+    updates: PobUpdates;
+    bundled: string;
+    root: string;
+    states: PobUpdateState[];
+    source: ReturnType<typeof fakeSource>;
+} {
     const base: string = mkdtempSync(join(tmpdir(), 'pob-updates-'));
     dirs.push(base);
     const bundled: string = join(base, 'bundled');
@@ -75,7 +81,14 @@ function setup(latest: string): { updates: PobUpdates; bundled: string; root: st
     const root: string = join(base, 'local', 'pob');
     const states: PobUpdateState[] = [];
     const source = fakeSource(latest);
-    const updates: PobUpdates = new PobUpdates({ root: root, bundledDir: bundled, fixedDir: undefined, source: source, logger: silent, onState: (s) => states.push(s) });
+    const updates: PobUpdates = new PobUpdates({
+        root: root,
+        bundledDir: bundled,
+        fixedDir: undefined,
+        source: source,
+        logger: silent,
+        onState: (s) => states.push(s),
+    });
     return { updates: updates, bundled: bundled, root: root, states: states, source: source };
 }
 
@@ -87,16 +100,20 @@ test('PobUpdates: the bundled copy is live until an update; a newer copy goes li
     let smokedOn: string | undefined;
     const order: string[] = [];
     let swapped: number = 0;
-    const done: PobUpdateState = await updates.update(async (dir: string) => {
-        smokedOn = dir;
-        order.push('smoke');
-        return 'ok';
-    }, async () => {
-        swapped++;
-    }, async (dir: string) => {
-        assert.ok(dir.endsWith('2.69.0.staging'));
-        order.push('rebuild');
-    });
+    const done: PobUpdateState = await updates.update(
+        async (dir: string) => {
+            smokedOn = dir;
+            order.push('smoke');
+            return 'ok';
+        },
+        async () => {
+            swapped++;
+        },
+        async (dir: string) => {
+            assert.ok(dir.endsWith('2.69.0.staging'));
+            order.push('rebuild');
+        },
+    );
     assert.deepEqual(order, ['rebuild', 'smoke']);
     assert.equal(done.phase, 'idle', done.message ?? '');
     assert.equal(done.live, '2.69.0');
@@ -108,7 +125,12 @@ test('PobUpdates: the bundled copy is live until an update; a newer copy goes li
     assert.equal(manifestVersion(join(root, '2.69.0')), '2.69.0');
     assert.ok(!existsSync(join(root, '2.69.0.staging')));
     // Only the changed file and the two headless files were fetched (plus the manifest).
-    assert.deepEqual(source.asked.sort(), ['manifest.xml', 'src/HeadlessWrapper.lua', 'src/Modules/Data.lua', 'src/_SimpleGraphic.def.lua']);
+    assert.deepEqual(source.asked.sort(), [
+        'manifest.xml',
+        'src/HeadlessWrapper.lua',
+        'src/Modules/Data.lua',
+        'src/_SimpleGraphic.def.lua',
+    ]);
     assert.ok(states.some((s) => s.phase === 'updating' && (s.step ?? '').startsWith('Downloading')));
 
     const back: PobUpdateState = await updates.rollback(async () => {
@@ -121,11 +143,15 @@ test('PobUpdates: the bundled copy is live until an update; a newer copy goes li
 
 test('PobUpdates: a failed smoke check keeps the live copy and removes the staging folder', async () => {
     const { updates, bundled, root } = setup('2.69.0');
-    const result: PobUpdateState = await updates.update(async () => {
-        throw new Error("your own Boots re-listed doesn't score +0");
-    }, async () => {
-        assert.fail('no swap on failure');
-    }, async () => {});
+    const result: PobUpdateState = await updates.update(
+        async () => {
+            throw new Error("your own Boots re-listed doesn't score +0");
+        },
+        async () => {
+            assert.fail('no swap on failure');
+        },
+        async () => {},
+    );
     assert.equal(result.phase, 'failed');
     assert.match(result.message ?? '', /2\.68\.1 is still in use.*\+0/);
     assert.equal(updates.liveDir(), bundled);
@@ -135,7 +161,11 @@ test('PobUpdates: a failed smoke check keeps the live copy and removes the stagi
 
 test('PobUpdates: nothing to do when the live copy is the latest; a newer bundled copy beats an older update', async () => {
     const { updates, bundled, root } = setup('2.68.1');
-    const same: PobUpdateState = await updates.update(async () => 'ok', async () => {}, async () => {});
+    const same: PobUpdateState = await updates.update(
+        async () => 'ok',
+        async () => {},
+        async () => {},
+    );
     assert.equal(same.phase, 'idle');
     assert.match(same.message ?? '', /is the latest/);
 

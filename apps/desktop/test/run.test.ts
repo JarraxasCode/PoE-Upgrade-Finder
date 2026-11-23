@@ -3,6 +3,7 @@ import { mkdirSync, mkdtempSync, readdirSync, rmSync, utimesSync, writeFileSync 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
+import { NO_PLAN_MATCH } from '@poe-upgrade-finder/core';
 import type { EvaluatedItem } from '@poe-upgrade-finder/core';
 import { CancelledError } from '@poe-upgrade-finder/trade';
 import type { PolicySnapshot, TradePolicy } from '@poe-upgrade-finder/trade';
@@ -59,6 +60,7 @@ function evaluated(over: Partial<{ gain: number; seller: string | undefined; tex
         failedFloors: [],
         missedTargets: [],
         flags: [{ checkId: 'life', kind: 'flag', status: 'fail', detail: 'Life: 4000 (was 4100)' }],
+        plan: NO_PLAN_MATCH,
     };
 }
 
@@ -79,11 +81,20 @@ test('UI items: no seller name crosses; NaN gains become null; hidden reasons pa
 
 test('the rate-limit panel: windows per policy; a wait shows only until it ends', () => {
     const snap: Map<TradePolicy, PolicySnapshot> = new Map<TradePolicy, PolicySnapshot>([
-        ['search', { policy: 'trade-search-request-limit', windows: [{ rule: 'Ip', count: 3, local: 3, server: 2, allowed: 5, limit: 8, period: 10, restrict: 60 }] }],
+        [
+            'search',
+            {
+                policy: 'trade-search-request-limit',
+                windows: [{ rule: 'Ip', count: 3, local: 3, server: 2, allowed: 5, limit: 8, period: 10, restrict: 60 }],
+            },
+        ],
         ['fetch', { policy: 'trade-fetch-request-limit', windows: [] }],
     ]);
     const panel = limitPanel(snap, { policy: 'search', untilMs: 2_000, reason: 'Ip window' }, 1_000);
-    assert.deepEqual(panel.policies.map((p) => p.policy), ['fetch', 'search']);
+    assert.deepEqual(
+        panel.policies.map((p) => p.policy),
+        ['fetch', 'search'],
+    );
     assert.deepEqual(panel.policies[1]?.windows, [{ count: 3, allowed: 5, limit: 8, periodS: 10 }]);
     assert.equal(panel.wait?.reason, 'Ip window');
     assert.equal(limitPanel(snap, { policy: 'search', untilMs: 2_000, reason: 'x' }, 3_000).wait, null);
@@ -108,7 +119,11 @@ test('run files: ids recognised; only the newest 20 runs are kept, with all thei
     }
     writeFileSync(join(dir, 'keep-me.json'), '{}');
     const removed: string[] = pruneRuns(dir, 20);
-    assert.deepEqual(removed.sort(), ['Boots-2026-11-01T10-00-00-000Z', 'Boots-2026-11-02T10-00-00-000Z', 'Boots-2026-11-03T10-00-00-000Z']);
+    assert.deepEqual(removed.sort(), [
+        'Boots-2026-11-01T10-00-00-000Z',
+        'Boots-2026-11-02T10-00-00-000Z',
+        'Boots-2026-11-03T10-00-00-000Z',
+    ]);
     const left: string[] = readdirSync(dir);
     assert.equal(left.length, 20 * 3 + 1);
     assert.ok(left.includes('keep-me.json'));

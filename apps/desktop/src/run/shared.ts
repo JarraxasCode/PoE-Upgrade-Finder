@@ -4,18 +4,33 @@
 import { readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buyLink, saveSpec } from '@poe-upgrade-finder/core';
-import type { EngineScore, FilteredItem, RunEngine, RunResult, SlotSearchSpec } from '@poe-upgrade-finder/core';
-import type { EngineClient, GearSlot, ItemInfo, ResolvedTarget, ScoreItemResult, StatBlock, TargetRequest } from '@poe-upgrade-finder/engine-client';
+import type { EngineScore, FilteredItem, LevelFilter, RunEngine, RunResult, SlotPlan, SlotSearchSpec } from '@poe-upgrade-finder/core';
+import type {
+    EngineClient,
+    GearSlot,
+    ItemInfo,
+    ResolvedTarget,
+    ScoreItemResult,
+    StatBlock,
+    TargetRequest,
+} from '@poe-upgrade-finder/engine-client';
 
 /** PoB scores the run's items in its slot, with its damage target. */
 export function engineAdapter(engine: EngineClient, slot: GearSlot, target: TargetRequest): RunEngine {
     return {
         async score(texts: readonly string[], onItem: (result: EngineScore) => void, signal?: AbortSignal): Promise<void> {
-            await engine.score(slot, texts, (r: ScoreItemResult) => {
-                onItem(r.ok
-                    ? { index: r.index, ok: true, stats: r.stats, unparsed: r.unparsed, validForSlot: r.validForSlot }
-                    : { index: r.index, ok: false, message: r.error.message });
-            }, { target: target, ...(signal === undefined ? {} : { signal: signal }) });
+            await engine.score(
+                slot,
+                texts,
+                (r: ScoreItemResult) => {
+                    onItem(
+                        r.ok
+                            ? { index: r.index, ok: true, stats: r.stats, unparsed: r.unparsed, validForSlot: r.validForSlot }
+                            : { index: r.index, ok: false, message: r.error.message },
+                    );
+                },
+                { target: target, ...(signal === undefined ? {} : { signal: signal }) },
+            );
         },
     };
 }
@@ -36,6 +51,8 @@ export function itemJson(f: FilteredItem, league: string): unknown {
         flags: e.flags.map((c) => c.detail),
         missedTargets: e.missedTargets.map((c) => c.detail),
         unparsed: e.scored.unparsed,
+        // Which lines met each include, hard need, exclude and defence (issue #6).
+        plan: e.plan,
         buyLink: buyLink(league, e.item) ?? null,
         damage: e.scored.stats.damage,
         values: e.scored.stats.values,
@@ -60,6 +77,10 @@ export interface RunRecordInput {
     readonly currentItem: ItemInfo;
     readonly spec: SlotSearchSpec;
     readonly result: RunResult;
+    /** The slot plan searched (the windowed app); missing: none (the headless mode). */
+    readonly plan?: SlotPlan | undefined;
+    /** The build's level requirement filter (issue #22); missing: up to the character's level. */
+    readonly levelFilter?: LevelFilter | undefined;
 }
 
 export function runRecord(input: RunRecordInput): unknown {
@@ -79,6 +100,8 @@ export function runRecord(input: RunRecordInput): unknown {
         baseline: { damage: input.baseline.damage, values: input.baseline.values },
         target: input.target,
         currentItem: input.currentItem,
+        plan: input.plan ?? null,
+        levelFilter: input.levelFilter ?? null,
         spec: saveSpec(input.spec),
         searches: input.result.searches,
         counts: input.result.counts,

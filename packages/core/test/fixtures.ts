@@ -1,5 +1,6 @@
 // Small hand-made stat blocks and items for the core tests.
 
+import { NO_PLAN_MATCH } from '../src/plan-match.ts';
 import type { EvaluatedItem } from '../src/evaluate.ts';
 import type { Gain } from '../src/gain.ts';
 import type { ListedItem } from '../src/spec.ts';
@@ -58,7 +59,9 @@ export function listed(id: string, chaos: number | undefined, overrides: Partial
 /** An evaluated item with the given gain and floors, for the junk filter and value rule. */
 export function evaluated(item: ListedItem, gainPct: number, floorsPass: boolean = true): EvaluatedItem {
     const gain: Gain = { dpsPct: gainPct, ehpPct: gainPct, gain: gainPct };
-    const failed = floorsPass ? [] : [{ checkId: 'chaos-res', kind: 'floor' as const, status: 'fail' as const, detail: 'Chaos res ≥ 50: 40 (was 75)' }];
+    const failed = floorsPass
+        ? []
+        : [{ checkId: 'chaos-res', kind: 'floor' as const, status: 'fail' as const, detail: 'Chaos res ≥ 50: 40 (was 75)' }];
     return {
         item: item,
         scored: { stats: baseStats(), unparsed: [] },
@@ -69,5 +72,6 @@ export function evaluated(item: ListedItem, gainPct: number, floorsPass: boolean
         failedFloors: failed,
         missedTargets: [],
         flags: [],
+        plan: NO_PLAN_MATCH,
     };
 }

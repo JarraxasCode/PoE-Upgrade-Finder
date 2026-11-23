@@ -179,8 +179,12 @@ export class JsonlLogger {
                     continue;
                 }
                 const path: string = join(folder, name);
-                const s = statSync(path);
-                files.push({ path: path, mtime: s.mtimeMs, size: s.size });
+                try {
+                    const s = statSync(path);
+                    files.push({ path: path, mtime: s.mtimeMs, size: s.size });
+                } catch {
+                    // Gone or locked (antivirus, an editor): pruning is best effort and must never stop the app.
+                }
             }
         }
         const cutoff: number = this.now() - this.maxDays * DAY_MS;
@@ -188,8 +192,12 @@ export class JsonlLogger {
         let total: number = files.reduce((sum: number, f: { size: number }) => sum + f.size, 0);
         for (const f of files) {
             if (f.mtime < cutoff || total > this.maxBytes) {
-                unlinkSync(f.path);
-                total -= f.size;
+                try {
+                    unlinkSync(f.path);
+                    total -= f.size;
+                } catch {
+                    // Locked: try again on the next start.
+                }
             }
         }
     }

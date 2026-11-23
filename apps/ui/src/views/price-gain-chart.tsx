@@ -122,52 +122,102 @@ export function PriceGainChart(props: Props): JSX.Element {
         <div class="card chart-card">
             <h2>Price vs gain</h2>
             <ul class="chart-legend muted small" aria-hidden="true">
-                <li><svg width="12" height="12"><circle cx="6" cy="6" r="4" class="pt worth" /></svg>Worth a look</li>
-                <li><svg width="12" height="12"><circle cx="6" cy="6" r="4" class="pt other" /></svg>Filtered out</li>
-                <li><svg width="12" height="12"><circle cx="6" cy="6" r="3.5" class="pt floor" /></svg>Breaks a floor</li>
-                {pick !== undefined && <li><svg width="14" height="14"><circle cx="7" cy="7" r="5" class="pt pick" /></svg>The pick</li>}
+                <li>
+                    <svg width="12" height="12">
+                        <circle cx="6" cy="6" r="4" class="pt worth" />
+                    </svg>
+                    Worth a look
+                </li>
+                <li>
+                    <svg width="12" height="12">
+                        <circle cx="6" cy="6" r="4" class="pt other" />
+                    </svg>
+                    Filtered out
+                </li>
+                <li>
+                    <svg width="12" height="12">
+                        <circle cx="6" cy="6" r="3.5" class="pt floor" />
+                    </svg>
+                    Breaks a floor
+                </li>
+                {pick !== undefined && (
+                    <li>
+                        <svg width="14" height="14">
+                            <circle cx="7" cy="7" r="5" class="pt pick" />
+                        </svg>
+                        The pick
+                    </li>
+                )}
             </ul>
             <div ref={wrapRef} class="chart-wrap">
-                <svg width={width} height={HEIGHT} class="chart" role="img" aria-label={label} tabIndex={0}
-                    onPointerMove={onMove} onPointerLeave={() => {
+                <svg
+                    width={width}
+                    height={HEIGHT}
+                    class="chart"
+                    role="img"
+                    aria-label={label}
+                    tabIndex={0}
+                    onPointerMove={onMove}
+                    onPointerLeave={() => {
                         setHoverId(null);
-                    }} onBlur={() => {
+                    }}
+                    onBlur={() => {
                         setHoverId(null);
-                    }} onKeyDown={onKey}>
+                    }}
+                    onKeyDown={onKey}
+                >
                     {model.y.ticks.map((t: number) => (
                         <g key={`y${t}`}>
                             <line x1={PAD.left} x2={width - PAD.right} y1={py(t)} y2={py(t)} class={t === 0 ? 'axis-zero' : 'grid'} />
-                            <text x={PAD.left - 8} y={py(t) + 4} class="tick" text-anchor="end">{t === 0 ? '0%' : signedPct(t, Math.abs(t) < 10 && !Number.isInteger(t) ? 1 : 0)}</text>
+                            <text x={PAD.left - 8} y={py(t) + 4} class="tick" text-anchor="end">
+                                {t === 0 ? '0%' : signedPct(t, Math.abs(t) < 10 && !Number.isInteger(t) ? 1 : 0)}
+                            </text>
                         </g>
                     ))}
                     {model.x.ticks.map((t: number) => (
-                        <text key={`x${t}`} x={px(t)} y={HEIGHT - 8} class="tick" text-anchor="middle">{priceTick(t)}</text>
+                        <text key={`x${t}`} x={px(t)} y={HEIGHT - 8} class="tick" text-anchor="middle">
+                            {priceTick(t)}
+                        </text>
                     ))}
                     <line x1={budgetX} x2={budgetX} y1={PAD.top} y2={PAD.top + plotH} class="ref" />
-                    <text x={budgetX - 6} y={PAD.top - 8} class="ref-label" text-anchor="end">budget {header.budgetLabel}</text>
+                    <text x={budgetX - 6} y={PAD.top - 8} class="ref-label" text-anchor="end">
+                        budget {header.budgetLabel}
+                    </text>
                     {minGainY >= PAD.top && minGainY <= PAD.top + plotH && (
                         <g>
                             <line x1={PAD.left} x2={width - PAD.right} y1={minGainY} y2={minGainY} class="ref" />
-                            <text x={width - PAD.right} y={minGainY - 6} class="ref-label" text-anchor="end">+{header.minGainPct}% minimum</text>
+                            <text x={width - PAD.right} y={minGainY - 6} class="ref-label" text-anchor="end">
+                                +{header.minGainPct}% minimum
+                            </text>
                         </g>
                     )}
                     {model.points.map((p: ChartPoint) => (
-                        <circle key={p.item.id} cx={px(p.x)} cy={py(p.y)} r={p.kind === 'floor' ? 3.5 : 4}
-                            class={`pt ${p.kind}${p.item.id === hoverId ? ' hover' : ''}`} />
+                        <circle
+                            key={p.item.id}
+                            cx={px(p.x)}
+                            cy={py(p.y)}
+                            r={p.kind === 'floor' ? 3.5 : 4}
+                            class={`pt ${p.kind}${p.item.id === hoverId ? ' hover' : ''}`}
+                        />
                     ))}
                     {pick !== undefined && (
                         <g>
                             <circle cx={px(pick.x)} cy={py(pick.y)} r={6} class={`pt pick${pick.item.id === hoverId ? ' hover' : ''}`} />
-                            <text x={px(pick.x) + 10} y={py(pick.y) - 8} class="pt-label">Pick</text>
+                            <text x={px(pick.x) + 10} y={py(pick.y) - 8} class="pt-label">
+                                Pick
+                            </text>
                         </g>
                     )}
                 </svg>
-                {hovered !== undefined && <div ref={anchorRef} class={`chart-anchor${anchorClass(TIP_PREFIX + hovered.item.id)}`} aria-hidden="true" />}
+                {hovered !== undefined && (
+                    <div ref={anchorRef} class={`chart-anchor${anchorClass(TIP_PREFIX + hovered.item.id)}`} aria-hidden="true" />
+                )}
             </div>
             <Readout point={shown} header={header} isPick={shown !== undefined && shown === pick && hovered === undefined} />
             {(model.clipped > 0 || model.unplotted > 0) && (
                 <p class="muted small">
-                    {model.clipped > 0 && `${model.clipped} item${model.clipped === 1 ? '' : 's'} below ${model.y.min}% drawn on the bottom edge. `}
+                    {model.clipped > 0 &&
+                        `${model.clipped} item${model.clipped === 1 ? '' : 's'} below ${model.y.min}% drawn on the bottom edge. `}
                     {model.unplotted > 0 && `${model.unplotted} not on the chart (no chaos price or no gain figure); they're in the list.`}
                 </p>
             )}
@@ -178,7 +228,11 @@ export function PriceGainChart(props: Props): JSX.Element {
 function Readout(props: { readonly point: ChartPoint | undefined; readonly header: RunHeader; readonly isPick: boolean }): JSX.Element {
     const p: ChartPoint | undefined = props.point;
     if (p === undefined) {
-        return <p class="chart-readout muted small" aria-live="polite">Hover a dot to read the item.</p>;
+        return (
+            <p class="chart-readout muted small" aria-live="polite">
+                Hover a dot to read the item.
+            </p>
+        );
     }
     const i: UiItem = p.item;
     return (
@@ -186,11 +240,24 @@ function Readout(props: { readonly point: ChartPoint | undefined; readonly heade
             {i.view !== null && <ItemImage view={i.view} size="row" />}
             {props.isPick && <span class="muted">The pick: </span>}
             <strong class="num">{signedPct(i.gainPct ?? 0)}</strong>
-            <span class="muted"> overall · DPS {pct(i.dpsPct)} · EHP {pct(i.ehpPct)} · </span>
-            {i.price === null ? <span class="muted">no price</span> : <strong><Orb currency={i.price.currency} amount={i.price.amount} /></strong>}
+            <span class="muted">
+                {' '}
+                overall · DPS {pct(i.dpsPct)} · EHP {pct(i.ehpPct)} ·{' '}
+            </span>
+            {i.price === null ? (
+                <span class="muted">no price</span>
+            ) : (
+                <strong>
+                    <Orb currency={i.price.currency} amount={i.price.amount} />
+                </strong>
+            )}
             <span class="muted"> · </span>
             {i.name || i.baseType}
-            <span class="muted"> · {i.name ? `${i.baseType} · ` : ''}{bandLabel(props.header, i.bandId)}</span>
+            <span class="muted">
+                {' '}
+                · {i.name ? `${i.baseType} · ` : ''}
+                {bandLabel(props.header, i.bandId)}
+            </span>
         </p>
     );
 }

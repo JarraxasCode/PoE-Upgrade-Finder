@@ -76,13 +76,20 @@ test('fetch joins up to 10 ids, passes the query id and keeps the requested orde
     const r: Rig = rig([response(200, fetchHeaders(1), { result: [listingJson('b', 1, 'divine'), listingJson('a', 30, 'chaos')] })]);
     const result: FetchResponse = await r.client.fetch(['a', 'b'], 'q1');
     assert.equal(r.transport.requests[0]?.url, 'https://www.pathofexile.com/api/trade/fetch/a,b?query=q1');
-    assert.deepEqual(result.listings.map((l: { readonly id: string }) => l.id), ['a', 'b']);
+    assert.deepEqual(
+        result.listings.map((l: { readonly id: string }) => l.id),
+        ['a', 'b'],
+    );
     assert.throws(() => r.client.fetch([]), RangeError);
     assert.throws(() => r.client.fetch(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']), RangeError);
 });
 
 test('"Query is too complex" is a site error with the site code, not retried', async () => {
-    const r: Rig = rig([response(400, searchHeaders(2, 2), { error: { code: 2, message: 'Query is too complex. Please reduce the amount of filters used.' } })]);
+    const r: Rig = rig([
+        response(400, searchHeaders(2, 2), {
+            error: { code: 2, message: 'Query is too complex. Please reduce the amount of filters used.' },
+        }),
+    ]);
     await assert.rejects(r.client.search('Covens', BODY), (error: unknown) => {
         assert.ok(error instanceof TradeError);
         assert.equal(error.code, 'site-error');
@@ -106,7 +113,9 @@ test('a 429 is retried once after its Retry-After', async () => {
 });
 
 test('a 429 with a long Retry-After stops the run instead of waiting', async () => {
-    const r: Rig = rig([response(429, searchHeaders(3, 3, { 'retry-after': '600' }), { error: { code: 3, message: 'Rate limit exceeded' } })]);
+    const r: Rig = rig([
+        response(429, searchHeaders(3, 3, { 'retry-after': '600' }), { error: { code: 3, message: 'Rate limit exceeded' } }),
+    ]);
     await assert.rejects(r.client.search('Covens', BODY), RateLimitStop);
     assert.equal(r.transport.requests.length, 1);
 });
@@ -130,7 +139,10 @@ test('Cloudflare and a lost session stop at once with their own codes', async ()
     assert.equal(out.client.signedIn, false);
 
     const redirect: Rig = rig([{ kind: 'redirect', status: 302, location: 'https://www.pathofexile.com/login' }]);
-    await assert.rejects(redirect.client.search('Covens', BODY), (error: unknown) => error instanceof TradeError && error.code === 'redirect' && /\/login/.test(error.message));
+    await assert.rejects(
+        redirect.client.search('Covens', BODY),
+        (error: unknown) => error instanceof TradeError && error.code === 'redirect' && /\/login/.test(error.message),
+    );
 });
 
 test('a cancelled call rejects with CancelledError', async () => {
@@ -140,7 +152,10 @@ test('a cancelled call rejects with CancelledError', async () => {
 
 test('an unexpected 200 body is a bad-response error naming the field', async () => {
     const r: Rig = rig([response(200, searchHeaders(1, 1), { id: 'q', total: 1 })]);
-    await assert.rejects(r.client.search('Covens', BODY), (error: unknown) => error instanceof TradeError && error.code === 'bad-response' && /search\.result/.test(error.message));
+    await assert.rejects(
+        r.client.search('Covens', BODY),
+        (error: unknown) => error instanceof TradeError && error.code === 'bad-response' && /search\.result/.test(error.message),
+    );
 });
 
 test('every response with a body is handed to onResponse', async () => {

@@ -131,7 +131,13 @@ function fmt(value: number | undefined): string {
 }
 
 /** A "value ≥ threshold" check on one reading of PoB's output. */
-function minCheck(id: string, kind: 'floor' | 'target', label: string, read: (s: PobStats) => number | undefined, threshold: (s: PobStats) => number | undefined): ItemCheck {
+function minCheck(
+    id: string,
+    kind: 'floor' | 'target',
+    label: string,
+    read: (s: PobStats) => number | undefined,
+    threshold: (s: PobStats) => number | undefined,
+): ItemCheck {
     return {
         id: id,
         kind: kind,
@@ -160,41 +166,105 @@ function constant(n: number): () => number {
 export function floorChecks(settings: FloorSettings, slot: SlotId): ItemCheck[] {
     const checks: ItemCheck[] = [];
     if (settings.chaosResMin !== undefined) {
-        checks.push(minCheck('chaos-res', 'floor', `Chaos res ≥ ${settings.chaosResMin}`, (s: PobStats) => stat(s, 'ChaosResist'), constant(settings.chaosResMin)));
+        checks.push(
+            minCheck(
+                'chaos-res',
+                'floor',
+                `Chaos res ≥ ${settings.chaosResMin}`,
+                (s: PobStats) => stat(s, 'ChaosResist'),
+                constant(settings.chaosResMin),
+            ),
+        );
     }
     for (const el of ELEMENTS) {
         const min: number | undefined = settings.maxResMin?.[el];
         if (min !== undefined) {
-            checks.push(minCheck(`max-res-${el.toLowerCase()}`, 'floor', `Max ${el.toLowerCase()} res ≥ ${min}`, (s: PobStats) => maxRes(s, el), constant(min)));
+            checks.push(
+                minCheck(
+                    `max-res-${el.toLowerCase()}`,
+                    'floor',
+                    `Max ${el.toLowerCase()} res ≥ ${min}`,
+                    (s: PobStats) => maxRes(s, el),
+                    constant(min),
+                ),
+            );
         }
     }
     if (settings.elementalResCapped === true) {
         for (const el of ELEMENTS) {
             // Capped means Missing<El>Resist = 0, i.e. final res ≥ max res.
-            checks.push(minCheck(`res-capped-${el.toLowerCase()}`, 'floor', `${el} res capped`, (s: PobStats) => stat(s, `${el}Resist`), (s: PobStats) => maxRes(s, el)));
+            checks.push(
+                minCheck(
+                    `res-capped-${el.toLowerCase()}`,
+                    'floor',
+                    `${el} res capped`,
+                    (s: PobStats) => stat(s, `${el}Resist`),
+                    (s: PobStats) => maxRes(s, el),
+                ),
+            );
         }
     }
     if (settings.spellBlockMin !== undefined) {
-        checks.push(minCheck('spell-block', 'floor', `Spell block ≥ ${settings.spellBlockMin}`, (s: PobStats) => stat(s, 'SpellBlockChance'), constant(settings.spellBlockMin)));
+        checks.push(
+            minCheck(
+                'spell-block',
+                'floor',
+                `Spell block ≥ ${settings.spellBlockMin}`,
+                (s: PobStats) => stat(s, 'SpellBlockChance'),
+                constant(settings.spellBlockMin),
+            ),
+        );
     }
     if (settings.attributesMet === true) {
         for (const a of ATTRIBUTES) {
-            checks.push(minCheck(`attr-${a.toLowerCase()}`, 'floor', `${a} requirement met`, (s: PobStats) => stat(s, a), (s: PobStats) => stat(s, `Req${a}`) ?? 0));
+            checks.push(
+                minCheck(
+                    `attr-${a.toLowerCase()}`,
+                    'floor',
+                    `${a} requirement met`,
+                    (s: PobStats) => stat(s, a),
+                    (s: PobStats) => stat(s, `Req${a}`) ?? 0,
+                ),
+            );
         }
     }
     const t: FloorSettings['targets'] = settings.targets;
     if (t?.chaosRes !== undefined) {
-        checks.push(minCheck('target-chaos-res', 'target', `Chaos res ${t.chaosRes}`, (s: PobStats) => stat(s, 'ChaosResist'), constant(t.chaosRes)));
+        checks.push(
+            minCheck(
+                'target-chaos-res',
+                'target',
+                `Chaos res ${t.chaosRes}`,
+                (s: PobStats) => stat(s, 'ChaosResist'),
+                constant(t.chaosRes),
+            ),
+        );
     }
     for (const el of ELEMENTS) {
         const target: number | undefined = t?.maxRes?.[el];
         if (target !== undefined) {
-            checks.push(minCheck(`target-max-res-${el.toLowerCase()}`, 'target', `Max ${el.toLowerCase()} res ${target}`, (s: PobStats) => maxRes(s, el), constant(target)));
+            checks.push(
+                minCheck(
+                    `target-max-res-${el.toLowerCase()}`,
+                    'target',
+                    `Max ${el.toLowerCase()} res ${target}`,
+                    (s: PobStats) => maxRes(s, el),
+                    constant(target),
+                ),
+            );
         }
     }
     if (t?.overcapMin !== undefined) {
         for (const el of ELEMENTS) {
-            checks.push(minCheck(`target-overcap-${el.toLowerCase()}`, 'target', `${el} overcap ≥ ${t.overcapMin}`, (s: PobStats) => stat(s, `${el}ResistOverCap`), constant(t.overcapMin)));
+            checks.push(
+                minCheck(
+                    `target-overcap-${el.toLowerCase()}`,
+                    'target',
+                    `${el} overcap ≥ ${t.overcapMin}`,
+                    (s: PobStats) => stat(s, `${el}ResistOverCap`),
+                    constant(t.overcapMin),
+                ),
+            );
         }
     }
     if (settings.flagLifeLoss === true && !WEAPON_SLOTS.has(slot)) {
@@ -218,7 +288,12 @@ function lifeLossFlag(): ItemCheck {
                 return { checkId: 'life-loss', kind: 'flag', status: 'skipped', detail: 'Life: PoB has no value' };
             }
             // A flag "fails" when it is raised.
-            return { checkId: 'life-loss', kind: 'flag', status: now < was ? 'fail' : 'pass', detail: `Life ${fmt(now)} (was ${fmt(was)})` };
+            return {
+                checkId: 'life-loss',
+                kind: 'flag',
+                status: now < was ? 'fail' : 'pass',
+                detail: `Life ${fmt(now)} (was ${fmt(was)})`,
+            };
         },
     };
 }
@@ -274,7 +349,13 @@ export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped
         const before: number | undefined = stat(baseline, 'ChaosResist');
         const after: number | undefined = stat(stripped, 'ChaosResist');
         const total: number | undefined = stat(stripped, 'ChaosResistTotal');
-        if (before !== undefined && after !== undefined && total !== undefined && before >= settings.chaosResMin && after < settings.chaosResMin) {
+        if (
+            before !== undefined &&
+            after !== undefined &&
+            total !== undefined &&
+            before >= settings.chaosResMin &&
+            after < settings.chaosResMin
+        ) {
             needs.push(need(RES_STAT.Chaos, settings.chaosResMin - total, 'chaos res'));
         }
     }

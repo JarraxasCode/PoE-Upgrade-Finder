@@ -85,7 +85,13 @@ export function priceBands(budgetChaos: number, settings: BandSettings = {}): Pr
     }
     if (overFactor > 1) {
         const top: number = roundEdge(budgetChaos * overFactor);
-        bands.push({ id: 'over', label: `${chaosLabel(budget)} to ${chaosLabel(top)} (slightly over budget)`, minChaos: budget, maxChaos: top, role: 'over' });
+        bands.push({
+            id: 'over',
+            label: `${chaosLabel(budget)} to ${chaosLabel(top)} (slightly over budget)`,
+            minChaos: budget,
+            maxChaos: top,
+            role: 'over',
+        });
     }
     return bands;
 }
@@ -101,12 +107,15 @@ export interface BandSearch {
  * chaos search runs (the caller warns that divine-priced listings are missed).
  */
 export function bandSearches(band: PriceBand, chaosPerDivine: number | undefined): BandSearch[] {
-    const chaos: PriceFilter = band.minChaos === undefined ? { max: band.maxChaos, option: 'chaos' } : { min: band.minChaos, max: band.maxChaos, option: 'chaos' };
+    const chaos: PriceFilter =
+        band.minChaos === undefined ? { max: band.maxChaos, option: 'chaos' } : { min: band.minChaos, max: band.maxChaos, option: 'chaos' };
     const searches: BandSearch[] = [{ bandId: band.id, option: 'chaos', price: chaos }];
     if (chaosPerDivine !== undefined && chaosPerDivine > 0 && band.maxChaos >= chaosPerDivine) {
         const max: number = Math.ceil((band.maxChaos / chaosPerDivine) * 100) / 100;
         const divine: PriceFilter =
-            band.minChaos === undefined ? { max: max, option: 'divine' } : { min: Math.floor((band.minChaos / chaosPerDivine) * 100) / 100, max: max, option: 'divine' };
+            band.minChaos === undefined
+                ? { max: max, option: 'divine' }
+                : { min: Math.floor((band.minChaos / chaosPerDivine) * 100) / 100, max: max, option: 'divine' };
         searches.push({ bandId: band.id, option: 'divine', price: divine });
     }
     return searches;
@@ -173,7 +182,10 @@ export function splitDepth(depth: number, searches: readonly SearchSize[]): numb
 }
 
 /** A listing's price in chaos at the run's rate; undefined for other currencies (flagged, not converted). */
-export function chaosEquivalent(price: { readonly amount: number; readonly currency: string } | undefined, chaosPerDivine: number | undefined): number | undefined {
+export function chaosEquivalent(
+    price: { readonly amount: number; readonly currency: string } | undefined,
+    chaosPerDivine: number | undefined,
+): number | undefined {
     if (price === undefined) {
         return undefined;
     }

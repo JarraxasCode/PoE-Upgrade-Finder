@@ -17,17 +17,36 @@ const lines: string[] = [
 test('parse: only lines the logger writes', () => {
     assert.equal(parseLogLine('not json'), undefined);
     assert.equal(parseLogLine(lines[5] ?? ''), undefined);
-    assert.deepEqual(parseLogLine(lines[1] ?? ''), { t: 2, level: 'info', area: 'run', msg: 'search', runId: 'Boots-1', data: { total: 10 } });
+    assert.deepEqual(parseLogLine(lines[1] ?? ''), {
+        t: 2,
+        level: 'info',
+        area: 'run',
+        msg: 'search',
+        runId: 'Boots-1',
+        data: { total: 10 },
+    });
 });
 
 test('filter: minimum level, area, run; newest first; areas for the picker', () => {
     const text: string = lines.join('\n');
     const warn = filterLog(text, { minLevel: 'warn', limit: 100 });
-    assert.deepEqual(warn.lines.map((l) => l.t), [4, 3]);
+    assert.deepEqual(
+        warn.lines.map((l) => l.t),
+        [4, 3],
+    );
     assert.deepEqual(warn.areas, ['engine', 'run', 'trade']);
-    assert.deepEqual(filterLog(text, { minLevel: 'debug', area: 'trade', limit: 100 }).lines.map((l) => l.t), [3, 1]);
-    assert.deepEqual(filterLog(text, { minLevel: 'debug', runId: 'Boots-1', limit: 100 }).lines.map((l) => l.t), [2]);
-    assert.deepEqual(filterLog(text, { minLevel: 'debug', limit: 2 }).lines.map((l) => l.t), [4, 3]);
+    assert.deepEqual(
+        filterLog(text, { minLevel: 'debug', area: 'trade', limit: 100 }).lines.map((l) => l.t),
+        [3, 1],
+    );
+    assert.deepEqual(
+        filterLog(text, { minLevel: 'debug', runId: 'Boots-1', limit: 100 }).lines.map((l) => l.t),
+        [2],
+    );
+    assert.deepEqual(
+        filterLog(text, { minLevel: 'debug', limit: 2 }).lines.map((l) => l.t),
+        [4, 3],
+    );
 });
 
 test('tail: starts at a whole line when the file is cut', () => {
@@ -45,7 +64,13 @@ test('tail: starts at a whole line when the file is cut', () => {
 
 test('export: redacted again, seller keys dropped, junk lines left out', () => {
     const text: string = [
-        JSON.stringify({ t: 1, level: 'info', area: 'trade', msg: 'x', data: { seller: 'Someone', cookie: 'POESESSID=abc', nested: { accountName: 'A', ok: 1 } } }),
+        JSON.stringify({
+            t: 1,
+            level: 'info',
+            area: 'trade',
+            msg: 'x',
+            data: { seller: 'Someone', cookie: 'POESESSID=abc', nested: { accountName: 'A', ok: 1 } },
+        }),
         'garbage',
     ].join('\n');
     const out: string = redactForExport(text);

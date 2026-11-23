@@ -6,6 +6,7 @@
 // cf-mitigated). Cookies and auth headers are never read out, so they can't reach a log.
 
 import type { ResponseHeaders } from './rate-limiter.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export type HttpMethod = 'GET' | 'POST';
 
@@ -79,7 +80,7 @@ export const nodeFetchTransport: HttpTransport = {
             if (timeout.aborted) {
                 return { kind: 'timeout' };
             }
-            return { kind: 'network-error', message: error instanceof Error ? error.message : String(error) };
+            return { kind: 'network-error', message: messageOf(error) };
         }
     },
 };

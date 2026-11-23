@@ -27,6 +27,7 @@ import {
     stageUpdate,
     verifyCopy,
 } from '@poe-upgrade-finder/pob-update';
+import { describeError } from '@poe-upgrade-finder/validate';
 
 const ROOT: string = resolve(import.meta.dirname, '..', '..');
 
@@ -55,7 +56,9 @@ async function main(): Promise<number> {
     });
     if (values['rebuild-querymods'] !== undefined) {
         const report: QueryModsReport = await rebuildQueryMods(resolveEnginePaths(resolve(values['rebuild-querymods'])));
-        console.log(`QueryMods.lua rebuilt in ${report.seconds.toFixed(1)} s: ${JSON.stringify(report.entries)}, ${report.unmatched} unmatched lines`);
+        console.log(
+            `QueryMods.lua rebuilt in ${report.seconds.toFixed(1)} s: ${JSON.stringify(report.entries)}, ${report.unmatched} unmatched lines`,
+        );
         return 0;
     }
     const source: GitHubSource = new GitHubSource({ userAgent: `poe-upgrade-finder/${await appVersion()}` });
@@ -65,7 +68,9 @@ async function main(): Promise<number> {
         return 0;
     }
     if (values.tag === undefined || values.from === undefined) {
-        console.error('usage: --latest | --tag vX.Y.Z --from <live PoB copy> [--out engine/pob] [--write-pin] | --rebuild-querymods <PoB copy>');
+        console.error(
+            'usage: --latest | --tag vX.Y.Z --from <live PoB copy> [--out engine/pob] [--write-pin] | --rebuild-querymods <PoB copy>',
+        );
         return 2;
     }
     const outDir: string = resolve(values.out ?? join(ROOT, 'engine', 'pob'));
@@ -142,7 +147,7 @@ main().then(
         process.exitCode = code;
     },
     (error: unknown) => {
-        console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+        console.error(describeError(error));
         process.exitCode = 1;
     },
 );

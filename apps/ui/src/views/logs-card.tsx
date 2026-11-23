@@ -11,11 +11,16 @@ import { call } from '../api.ts';
 import { findFocusLine } from '../log-focus.ts';
 import type { LogFocus } from '../log-focus.ts';
 import { logFocus } from '../state/log-focus.ts';
-import { messageOf } from '../state/loadable.ts';
 import { run } from '../state/run.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 const LIMIT: number = 300;
-const LEVEL_LABEL: Readonly<Record<UiLogLevel, string>> = { debug: 'Everything', info: 'Info and up', warn: 'Warnings and errors', error: 'Errors only' };
+const LEVEL_LABEL: Readonly<Record<UiLogLevel, string>> = {
+    debug: 'Everything',
+    info: 'Info and up',
+    warn: 'Warnings and errors',
+    error: 'Errors only',
+};
 
 function time(ms: number): string {
     return new Date(ms).toLocaleTimeString('en-GB', { hour12: false });
@@ -33,9 +38,15 @@ function LogRow(props: { readonly line: UiLogLine; readonly focused: boolean }):
     }, [props.focused]);
     return (
         <li ref={ref} class={`log-line ${l.level}${props.focused ? ' focused' : ''}`}>
-            <button type="button" class="log-head" aria-expanded={open} disabled={l.data === null} onClick={() => {
-                setOpen(!open);
-            }}>
+            <button
+                type="button"
+                class="log-head"
+                aria-expanded={open}
+                disabled={l.data === null}
+                onClick={() => {
+                    setOpen(!open);
+                }}
+            >
                 <span class="num muted">{time(l.t)}</span>
                 <span class={`log-level ${l.level}`}>{l.level.toUpperCase()}</span>
                 <span class="muted">{l.area}</span>
@@ -59,7 +70,9 @@ export function LogsCard(): JSX.Element {
         logFocus.value = null;
         return f;
     });
-    const [filters, setFilters] = useState<Filters>(focus === null ? { minLevel: 'info', area: null, runId: null } : { minLevel: focus.level, area: null, runId: focus.runId });
+    const [filters, setFilters] = useState<Filters>(
+        focus === null ? { minLevel: 'info', area: null, runId: null } : { minLevel: focus.level, area: null, runId: focus.runId },
+    );
     const [view, setView] = useState<LogsView | null>(null);
     const [focusIndex, setFocusIndex] = useState<number>(-1);
     const [error, setError] = useState<string | null>(null);
@@ -102,48 +115,76 @@ export function LogsCard(): JSX.Element {
             <div class="log-filters">
                 <label>
                     <span class="muted small">Show</span>
-                    <select value={filters.minLevel} onChange={(e: TargetedEvent<HTMLSelectElement>) => {
-                        const v: string = e.currentTarget.value;
-                        const level: UiLogLevel | undefined = UI_LOG_LEVELS.find((x: UiLogLevel) => x === v);
-                        if (level !== undefined) {
-                            setFilters({ ...filters, minLevel: level });
-                        }
-                    }}>
-                        {UI_LOG_LEVELS.map((l: UiLogLevel) => <option key={l} value={l}>{LEVEL_LABEL[l]}</option>)}
+                    <select
+                        value={filters.minLevel}
+                        onChange={(e: TargetedEvent<HTMLSelectElement>) => {
+                            const v: string = e.currentTarget.value;
+                            const level: UiLogLevel | undefined = UI_LOG_LEVELS.find((x: UiLogLevel) => x === v);
+                            if (level !== undefined) {
+                                setFilters({ ...filters, minLevel: level });
+                            }
+                        }}
+                    >
+                        {UI_LOG_LEVELS.map((l: UiLogLevel) => (
+                            <option key={l} value={l}>
+                                {LEVEL_LABEL[l]}
+                            </option>
+                        ))}
                     </select>
                 </label>
                 <label>
                     <span class="muted small">Area</span>
-                    <select value={filters.area ?? ''} onChange={(e: TargetedEvent<HTMLSelectElement>) => {
-                        setFilters({ ...filters, area: e.currentTarget.value === '' ? null : e.currentTarget.value });
-                    }}>
+                    <select
+                        value={filters.area ?? ''}
+                        onChange={(e: TargetedEvent<HTMLSelectElement>) => {
+                            setFilters({ ...filters, area: e.currentTarget.value === '' ? null : e.currentTarget.value });
+                        }}
+                    >
                         <option value="">All</option>
-                        {(view?.areas ?? []).map((a: string) => <option key={a} value={a}>{a}</option>)}
+                        {(view?.areas ?? []).map((a: string) => (
+                            <option key={a} value={a}>
+                                {a}
+                            </option>
+                        ))}
                     </select>
                 </label>
-                <button type="button" class="btn" onClick={() => void load()}>Refresh</button>
-                <button type="button" class="btn" onClick={() => void exportLogs()}>Export logs</button>
+                <button type="button" class="btn" onClick={() => void load()}>
+                    Refresh
+                </button>
+                <button type="button" class="btn" onClick={() => void exportLogs()}>
+                    Export logs
+                </button>
             </div>
             {filters.runId !== null && (
                 <p class="small">
-                    Only the run {filters.runId}. <button type="button" class="link" onClick={() => {
-                        setFilters({ ...filters, runId: null });
-                    }}>Show all runs</button>
+                    Only the run {filters.runId}.{' '}
+                    <button
+                        type="button"
+                        class="link"
+                        onClick={() => {
+                            setFilters({ ...filters, runId: null });
+                        }}
+                    >
+                        Show all runs
+                    </button>
                 </p>
             )}
             {focus !== null && view !== null && focusIndex < 0 && (
                 <p class="warn small">That line isn't in today's log (it may be from before midnight, or more than {LIMIT} lines back).</p>
             )}
             <p class="hint">
-                Today's log, newest first (the last {LIMIT} lines that match). Export logs saves today's log{snap !== null ? ' and the last run\'s' : ''} as a zip, checked
-                again for anything private, to send when something goes wrong.
+                Today's log, newest first (the last {LIMIT} lines that match). Export logs saves today's log
+                {snap !== null ? " and the last run's" : ''} as a zip, checked again for anything private, to send when something goes
+                wrong.
             </p>
             {exportMsg !== null && <p class="muted small">{exportMsg}</p>}
             {error !== null && <p class="fail">{error}</p>}
             {view !== null && view.lines.length === 0 && <p class="muted">No lines match.</p>}
             {view !== null && view.lines.length > 0 && (
                 <ul class="log-list">
-                    {view.lines.map((l: UiLogLine, i: number) => <LogRow key={`${l.t}-${i}`} line={l} focused={i === focusIndex} />)}
+                    {view.lines.map((l: UiLogLine, i: number) => (
+                        <LogRow key={`${l.t}-${i}`} line={l} focused={i === focusIndex} />
+                    ))}
                 </ul>
             )}
         </div>

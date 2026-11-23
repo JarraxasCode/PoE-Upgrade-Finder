@@ -36,11 +36,11 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
         }
     }
     const log: Logger = options.logger;
-    // Big enough that the Search and Run views fit without scrolling, but never beyond the screen's work area.
+    // Most of a 1080p screen (the Search view lays out in columns from about 1500 wide), never beyond the work area.
     const area: Electron.Size = screen.getPrimaryDisplay().workAreaSize;
     const win: BrowserWindow = new BrowserWindow({
-        width: Math.min(1440, Math.round(area.width * 0.9)),
-        height: Math.min(1000, Math.round(area.height * 0.94)),
+        width: Math.min(1760, Math.round(area.width * 0.92)),
+        height: Math.min(1200, Math.round(area.height * 0.94)),
         center: true,
         minWidth: 900,
         minHeight: 600,

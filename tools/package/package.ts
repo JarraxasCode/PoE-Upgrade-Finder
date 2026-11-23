@@ -27,6 +27,7 @@ import { build } from 'esbuild';
 import { parseManifest, readPin, verifyCopy, type PobPin } from '@poe-upgrade-finder/pob-update';
 import { ZipWriter } from '../../apps/desktop/src/services/zip.ts';
 import { setFuse } from '../electron-fuses/fuses.ts';
+import { describeError } from '@poe-upgrade-finder/validate';
 
 const ROOT: string = resolve(import.meta.dirname, '..', '..');
 const OUT: string = join(ROOT, 'out', 'package');
@@ -217,7 +218,7 @@ main().then(
         process.exitCode = code;
     },
     (error: unknown) => {
-        console.error(error instanceof Error ? (error.stack ?? error.message) : String(error));
+        console.error(describeError(error));
         process.exitCode = 1;
     },
 );

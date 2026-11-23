@@ -4,7 +4,7 @@ import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
 import type { LimitPanel, RunEventUi, RunHeader, RunRequest, RunSnapshot } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
-import { messageOf } from './loadable.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const run: Signal<RunSnapshot | null> = signal<RunSnapshot | null>(null);
 export const limits: Signal<LimitPanel | null> = signal<LimitPanel | null>(null);

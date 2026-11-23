@@ -6,12 +6,51 @@ import { array, boolean, isRecord, number, oneOf, record, string, ValidationErro
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
 import { parseBudgetText } from './budget.ts';
 import { readOptionalItemView } from './item-view.ts';
+import { readSlotEditorData, readSlotPlan, readSlotPlans } from './plan.ts';
+import type { SlotPlan } from './plan.ts';
 import { readLimitPanel, readRunEvent, readRunHeader, readRunSnapshot, readWeightPreview, RUN_PHASES } from './run.ts';
 import type { RunPhase, RunRequest } from './run.ts';
-import { ELEMENTS, GEAR_SLOTS, LISTING_TYPES, POB_UPDATE_PHASES, SEARCH_DEPTHS, SIGN_IN_STATUSES, UI_LOG_LEVELS } from './contract.ts';
+import {
+    ELEMENTS,
+    GEAR_SLOTS,
+    LEVEL_FILTER_KINDS,
+    LISTING_TYPES,
+    MAX_CHARACTER_LEVEL,
+    POB_UPDATE_PHASES,
+    SEARCH_DEPTHS,
+    SIGN_IN_STATUSES,
+    UI_LOG_LEVELS,
+} from './contract.ts';
 import type {
-    AppInfo, AppSettings, BuildEntry, BuildSettings, BuildsDirSource, BuildState, BuildsList, BuildSummary, Element, EquippedInfo, FloorSettings, GearSlot,
-    InvokeRequest, InvokeResponse, IpcErrorCode, LogsView, MainEvent, MethodName, NoticeLevel, Params, PobUpdateState, RateInfo, RateSource, RateState, Result, SignInState, TargetOption, UiLogLine,
+    AppInfo,
+    AppSettings,
+    BuildEntry,
+    BuildSettings,
+    BuildsDirSource,
+    BuildState,
+    BuildsList,
+    BuildSummary,
+    Element,
+    EquippedInfo,
+    FloorSettings,
+    GearSlot,
+    InvokeRequest,
+    InvokeResponse,
+    IpcErrorCode,
+    LevelFilter,
+    LogsView,
+    MainEvent,
+    MethodName,
+    NoticeLevel,
+    Params,
+    PobUpdateState,
+    RateInfo,
+    RateSource,
+    RateState,
+    Result,
+    SignInState,
+    TargetOption,
+    UiLogLine,
 } from './contract.ts';
 
 type Read<T> = (value: unknown, path: string) => T;
@@ -74,7 +113,14 @@ function nonEmpty(maxLength: number): Read<string> {
 /** A build id: a relative .xml path with forward slashes and no ".." (main still resolves it inside the folder). */
 function buildId(value: unknown, path: string): string {
     const s: string = nonEmpty(1024)(value, path);
-    if (!s.toLowerCase().endsWith('.xml') || s.startsWith('/') || s.includes('\\') || /[\u0000-\u001f]/.test(s) || /^[a-z]:/i.test(s) || s.split('/').some((p: string) => p === '..' || p === '.' || p === '')) {
+    if (
+        !s.toLowerCase().endsWith('.xml') ||
+        s.startsWith('/') ||
+        s.includes('\\') ||
+        /[\u0000-\u001f]/.test(s) ||
+        /^[a-z]:/i.test(s) ||
+        s.split('/').some((p: string) => p === '..' || p === '.' || p === '')
+    ) {
         throw new ValidationError(`${path}: not a build id`);
     }
     return s;
@@ -111,7 +157,16 @@ function perElement(value: unknown, path: string): Partial<Record<Element, numbe
 }
 
 export function readFloors(value: unknown, path: string): FloorSettings {
-    const r: JsonRecord = exact(value, path, ['chaosResMin', 'maxResMin', 'elementalResCapped', 'spellBlockMin', 'attributesMet', 'targets', 'flagLifeLoss', 'flagNetRegen']);
+    const r: JsonRecord = exact(value, path, [
+        'chaosResMin',
+        'maxResMin',
+        'elementalResCapped',
+        'spellBlockMin',
+        'attributesMet',
+        'targets',
+        'flagLifeLoss',
+        'flagNetRegen',
+    ]);
     const out: { -readonly [K in keyof FloorSettings]: FloorSettings[K] } = {};
     if (r['chaosResMin'] !== undefined) {
         out.chaosResMin = percent(r['chaosResMin'], `${path}.chaosResMin`);
@@ -156,7 +211,18 @@ export function readAppSettings(value: unknown, path: string): AppSettings {
 }
 
 export function readBuildSettings(value: unknown, path: string): BuildSettings {
-    const r: JsonRecord = exact(value, path, ['floors', 'blend', 'minGainPct', 'lastSlot', 'lastBudget', 'lastMinBudget', 'lastTarget', 'weightEdits']);
+    const r: JsonRecord = exact(value, path, [
+        'floors',
+        'blend',
+        'minGainPct',
+        'lastSlot',
+        'lastBudget',
+        'lastMinBudget',
+        'lastTarget',
+        'weightEdits',
+        'slotPlans',
+        'levelFilter',
+    ]);
     return {
         floors: readFloors(r['floors'], `${path}.floors`),
         blend: between(0, 1)(r['blend'], `${path}.blend`),
@@ -167,7 +233,30 @@ export function readBuildSettings(value: unknown, path: string): BuildSettings {
         lastMinBudget: r['lastMinBudget'] === undefined ? null : nullable(text(32))(r['lastMinBudget'], `${path}.lastMinBudget`),
         lastTarget: nullable(targetId)(r['lastTarget'], `${path}.lastTarget`),
         weightEdits: r['weightEdits'] === undefined ? {} : readWeightEdits(r['weightEdits'], `${path}.weightEdits`),
+        // Settings saved before slot plans existed have none.
+        slotPlans: r['slotPlans'] === undefined ? {} : readSlotPlans(r['slotPlans'], `${path}.slotPlans`),
+        // Settings saved before the filter was a setting: up to the character's level, as it always was.
+        levelFilter: r['levelFilter'] === undefined ? { kind: 'character' } : readLevelFilter(r['levelFilter'], `${path}.levelFilter`),
     };
+}
+
+export function readLevelFilter(value: unknown, path: string): LevelFilter {
+    const r: JsonRecord = record(value, path);
+    const kind: LevelFilter['kind'] = oneOf(r['kind'], `${path}.kind`, LEVEL_FILTER_KINDS);
+    if (kind !== 'max') {
+        if (Object.keys(r).some((k: string) => k !== 'kind')) {
+            throw new ValidationError(`${path}: only "max" takes a level`);
+        }
+        return { kind: kind };
+    }
+    const level: number = number(r['level'], `${path}.level`);
+    if (!Number.isInteger(level) || level < 1 || level > MAX_CHARACTER_LEVEL) {
+        throw new ValidationError(`${path}.level: expected a whole number from 1 to ${MAX_CHARACTER_LEVEL}`);
+    }
+    if (Object.keys(r).some((k: string) => k !== 'kind' && k !== 'level')) {
+        throw new ValidationError(`${path}: unexpected field`);
+    }
+    return { kind: 'max', level: level };
 }
 
 /** Per slot, stat id → weight (0 = off); weights are finite and not negative. */
@@ -190,7 +279,12 @@ function readWeightEdits(value: unknown, path: string): Partial<Record<GearSlot,
 }
 
 export function readRunRequest(value: unknown, path: string): RunRequest {
-    const r: JsonRecord = exact(value, path, ['buildId', 'slot', 'budget', 'minBudget', 'target', 'depth', 'listing']);
+    const r: JsonRecord = exact(value, path, ['buildId', 'slots', 'budget', 'minBudget', 'target', 'depth', 'listing']);
+    const slots: readonly SlotPlan[] = array(r['slots'], `${path}.slots`, readSlotPlan);
+    // v0.2 searches one slot per run; v0.4's batch lifts this without changing the shape.
+    if (slots.length !== 1) {
+        throw new ValidationError(`${path}.slots: expected exactly one slot plan, got ${slots.length}`);
+    }
     const minBudget: string = r['minBudget'] === undefined ? '' : text(32)(r['minBudget'], `${path}.minBudget`).trim();
     if (minBudget !== '' && parseBudgetText(minBudget) === undefined) {
         throw new ValidationError(`${path}.minBudget: not a price (100c or 1.5d)`);
@@ -201,7 +295,7 @@ export function readRunRequest(value: unknown, path: string): RunRequest {
     }
     return {
         buildId: buildId(r['buildId'], `${path}.buildId`),
-        slot: slot(r['slot'], `${path}.slot`),
+        slots: slots,
         budget: budget,
         minBudget: minBudget,
         target: targetId(r['target'], `${path}.target`),
@@ -247,8 +341,21 @@ export const METHOD_PARAMS: { readonly [M in MethodName]: ParamCheck<M> } = {
         return { buildId: buildId(r['buildId'], `${path}.buildId`), settings: readBuildSettings(r['settings'], `${path}.settings`) };
     },
     'weights.preview': (value: unknown, path: string) => {
-        const r: JsonRecord = exact(value, path, ['buildId', 'slot', 'target']);
-        return { buildId: buildId(r['buildId'], `${path}.buildId`), slot: slot(r['slot'], `${path}.slot`), target: targetId(r['target'], `${path}.target`) };
+        const r: JsonRecord = exact(value, path, ['buildId', 'slot', 'target', 'plan']);
+        const s: GearSlot = slot(r['slot'], `${path}.slot`);
+        const plan: SlotPlan | null = r['plan'] === undefined ? null : nullable(readSlotPlan)(r['plan'], `${path}.plan`);
+        if (plan !== null && plan.slot !== s) {
+            throw new ValidationError(`${path}.plan: the plan is for ${plan.slot}, not ${s}`);
+        }
+        return { buildId: buildId(r['buildId'], `${path}.buildId`), slot: s, target: targetId(r['target'], `${path}.target`), plan: plan };
+    },
+    'slot.data': (value: unknown, path: string) => {
+        const r: JsonRecord = exact(value, path, ['slot', 'itemType', 'base']);
+        return {
+            slot: slot(r['slot'], `${path}.slot`),
+            itemType: nonEmpty(60)(r['itemType'], `${path}.itemType`),
+            base: nullable(nonEmpty(120))(r['base'], `${path}.base`),
+        };
     },
     'signin.status': noParams,
     'signin.check': noParams,
@@ -371,7 +478,12 @@ function targetOption(value: unknown, path: string): TargetOption {
 export function readEquippedInfo(value: unknown, path: string): EquippedInfo {
     const r: JsonRecord = record(value, path);
     return {
-        slot: string(r['slot'], `${path}.slot`), name: string(r['name'], `${path}.name`), base: string(r['base'], `${path}.base`), rarity: string(r['rarity'], `${path}.rarity`),
+        slot: string(r['slot'], `${path}.slot`),
+        name: string(r['name'], `${path}.name`),
+        base: string(r['base'], `${path}.base`),
+        rarity: string(r['rarity'], `${path}.rarity`),
+        // Gear cached before the field existed has none.
+        itemType: r['itemType'] === undefined ? null : optString(r['itemType'], `${path}.itemType`),
         view: readOptionalItemView(r['view'], `${path}.view`),
     };
 }
@@ -404,8 +516,13 @@ function buildState(value: unknown, path: string): BuildState {
             return { kind: 'none' };
         case 'loading':
             return {
-                kind: 'loading', buildId: string(r['buildId'], `${path}.buildId`),
-                equipped: r['equipped'] === undefined || r['equipped'] === null ? null : array(r['equipped'], `${path}.equipped`, readEquippedInfo),
+                kind: 'loading',
+                buildId: string(r['buildId'], `${path}.buildId`),
+                equipped:
+                    r['equipped'] === undefined || r['equipped'] === null
+                        ? null
+                        : array(r['equipped'], `${path}.equipped`, readEquippedInfo),
+                summary: r['summary'] === undefined || r['summary'] === null ? null : readBuildSummary(r['summary'], `${path}.summary`),
             };
         case 'ready':
             return { kind: 'ready', summary: readBuildSummary(r['summary'], `${path}.summary`) };
@@ -475,6 +592,7 @@ export const METHOD_RESULTS: { readonly [M in MethodName]: ResultCheck<M> } = {
     'build.settings.get': readBuildSettings,
     'build.settings.save': readBuildSettings,
     'weights.preview': readWeightPreview,
+    'slot.data': readSlotEditorData,
     'signin.status': readSignInState,
     'signin.check': readSignInState,
     'signin.open': readSignInState,
@@ -516,7 +634,11 @@ function logLine(value: unknown, path: string): UiLogLine {
 
 export function readLogsView(value: unknown, path: string): LogsView {
     const r: JsonRecord = exact(value, path, ['file', 'lines', 'areas']);
-    return { file: string(r['file'], `${path}.file`), lines: array(r['lines'], `${path}.lines`, logLine), areas: array(r['areas'], `${path}.areas`, string) };
+    return {
+        file: string(r['file'], `${path}.file`),
+        lines: array(r['lines'], `${path}.lines`, logLine),
+        areas: array(r['areas'], `${path}.areas`, string),
+    };
 }
 
 const ERROR_CODES: readonly IpcErrorCode[] = ['bad-request', 'failed', 'not-allowed'];
@@ -528,7 +650,10 @@ export function parseInvokeResponse(value: unknown): InvokeResponse {
         return { ok: true, result: r['result'] };
     }
     const e: JsonRecord = record(r['error'], 'response.error');
-    return { ok: false, error: { code: oneOf(e['code'], 'response.error.code', ERROR_CODES), message: string(e['message'], 'response.error.message') } };
+    return {
+        ok: false,
+        error: { code: oneOf(e['code'], 'response.error.code', ERROR_CODES), message: string(e['message'], 'response.error.message') },
+    };
 }
 
 // Events -------------------------------------------------------------------------------------------------
@@ -542,7 +667,11 @@ export function parseMainEvent(value: unknown): MainEvent | undefined {
     }
     switch (value['kind']) {
         case 'notice':
-            return { kind: 'notice', level: oneOf(value['level'], 'event.level', NOTICE_LEVELS), message: string(value['message'], 'event.message') };
+            return {
+                kind: 'notice',
+                level: oneOf(value['level'], 'event.level', NOTICE_LEVELS),
+                message: string(value['message'], 'event.message'),
+            };
         case 'builds-changed':
             return { kind: 'builds-changed', list: readBuildsList(value['list'], 'event.list') };
         case 'build-state':

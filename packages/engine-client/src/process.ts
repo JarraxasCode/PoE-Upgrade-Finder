@@ -9,6 +9,7 @@ import { EngineError } from './errors.ts';
 import type { EngineLogger } from './logger.ts';
 import { parseMessage } from './protocol.ts';
 import type { CommandName, EngineMessage, FinalMessage, ReadyEvent, StreamEvent } from './protocol.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 /** How to start a worker: luahostCommand() builds this for the real engine; tests pass a fake one. */
 export interface EngineCommand {
@@ -44,7 +45,11 @@ export class EngineProcess {
 
     private constructor(command: EngineCommand, logger: EngineLogger) {
         this.logger = logger;
-        this.child = spawn(command.command, [...command.args], { env: { ...process.env, ...command.env }, stdio: ['pipe', 'pipe', 'pipe'], windowsHide: true });
+        this.child = spawn(command.command, [...command.args], {
+            env: { ...process.env, ...command.env },
+            stdio: ['pipe', 'pipe', 'pipe'],
+            windowsHide: true,
+        });
         this.logger.log('info', 'engine worker starting', { pid: this.child.pid, command: command.command });
         this.exitPromise = new Promise<number | null>((resolve: (code: number | null) => void) => {
             // 'close', not 'exit': it fires after stdout has drained, so a last reply (shutdown's) isn't lost.
@@ -77,7 +82,12 @@ export class EngineProcess {
         const started: number = Date.now();
         await new Promise<void>((resolve: () => void, reject: (error: EngineError) => void) => {
             const timer: NodeJS.Timeout = setTimeout(() => {
-                worker.fail(new EngineError('startup-failed', `the engine sent no ready event within ${startupTimeoutMs} ms${worker.stderrSummary()}`));
+                worker.fail(
+                    new EngineError(
+                        'startup-failed',
+                        `the engine sent no ready event within ${startupTimeoutMs} ms${worker.stderrSummary()}`,
+                    ),
+                );
             }, startupTimeoutMs);
             worker.onReady = (): void => {
                 clearTimeout(timer);
@@ -112,7 +122,12 @@ export class EngineProcess {
      * Sends one request. The idle timer restarts on every stream event, so a long tradeQuery or score batch
      * only times out when the engine goes quiet. A timeout kills the worker: a hung PoB can't be trusted.
      */
-    public request(cmd: CommandName, args: Readonly<Record<string, unknown>>, idleMs: number, onEvent: (event: StreamEvent) => void): Promise<FinalMessage> {
+    public request(
+        cmd: CommandName,
+        args: Readonly<Record<string, unknown>>,
+        idleMs: number,
+        onEvent: (event: StreamEvent) => void,
+    ): Promise<FinalMessage> {
         if (this.failure) {
             return Promise.reject(this.failure);
         }
@@ -121,7 +136,15 @@ export class EngineProcess {
         }
         const id: number = ++this.seq;
         return new Promise<FinalMessage>((resolve: (message: FinalMessage) => void, reject: (error: EngineError) => void) => {
-            const entry: Pending = { cmd: cmd, started: Date.now(), idleMs: idleMs, onEvent: onEvent, resolve: resolve, reject: reject, timer: undefined };
+            const entry: Pending = {
+                cmd: cmd,
+                started: Date.now(),
+                idleMs: idleMs,
+                onEvent: onEvent,
+                resolve: resolve,
+                reject: reject,
+                timer: undefined,
+            };
             this.pending.set(id, entry);
             this.armTimer(id, entry);
             this.child.stdin.write(`${JSON.stringify({ ...args, id: id, cmd: cmd })}\n`);
@@ -153,7 +176,12 @@ export class EngineProcess {
             clearTimeout(entry.timer);
         }
         entry.timer = setTimeout(() => {
-            this.fail(new EngineError('timeout', `engine ${entry.cmd} went ${entry.idleMs} ms without a reply (request ${id})${this.stderrSummary()}`));
+            this.fail(
+                new EngineError(
+                    'timeout',
+                    `engine ${entry.cmd} went ${entry.idleMs} ms without a reply (request ${id})${this.stderrSummary()}`,
+                ),
+            );
             this.kill(`${entry.cmd} timed out`);
         }, entry.idleMs);
     }
@@ -188,7 +216,7 @@ export class EngineProcess {
                     entry.onEvent(message);
                 } catch (error: unknown) {
                     // A bad event (or a throwing callback) ends this worker: the stream can't be trusted.
-                    const text: string = error instanceof Error ? error.message : String(error);
+                    const text: string = messageOf(error);
                     this.fail(new EngineError('protocol', `bad ${message.event} event from the engine: ${text}`));
                     this.kill('bad stream event');
                 }
@@ -205,7 +233,10 @@ export class EngineProcess {
                     clearTimeout(entry.timer);
                 }
                 this.logger.log(message.ok ? 'debug' : 'warn', `engine ${entry.cmd} ${message.ok ? 'done' : 'failed'}`, {
-                    id: message.id, ms: Date.now() - entry.started, error: message.error, warnings: message.warnings.length > 0 ? message.warnings : undefined,
+                    id: message.id,
+                    ms: Date.now() - entry.started,
+                    error: message.error,
+                    warnings: message.warnings.length > 0 ? message.warnings : undefined,
                 });
                 entry.resolve(message);
                 return;
@@ -215,7 +246,11 @@ export class EngineProcess {
 
     private handleExit(code: number | null, signal: NodeJS.Signals | null): void {
         this.exited = true;
-        this.logger.log(this.pending.size > 0 || !this.readyInfo ? 'warn' : 'info', 'engine worker exited', { pid: this.child.pid, code: code, signal: signal });
+        this.logger.log(this.pending.size > 0 || !this.readyInfo ? 'warn' : 'info', 'engine worker exited', {
+            pid: this.child.pid,
+            code: code,
+            signal: signal,
+        });
         this.fail(new EngineError('worker-exited', `the engine exited (code ${code ?? signal ?? '?'})${this.stderrSummary()}`));
     }
 

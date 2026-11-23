@@ -28,7 +28,9 @@ function RailLink(props: RailLinkProps): JSX.Element {
                 go(props.to);
             }}
         >
-            <span class="rail-icon" aria-hidden="true">{props.icon}</span>
+            <span class="rail-icon" aria-hidden="true">
+                {props.icon}
+            </span>
             {props.children}
         </a>
     );
@@ -51,9 +53,15 @@ export function App(): JSX.Element {
             <nav class="rail" aria-label="Main">
                 <img class="logo" src="icon.svg" alt="" aria-hidden="true" />
                 <AccountBadge />
-                <RailLink to="search" icon="⌕">Search</RailLink>
-                <RailLink to="run" icon="▶">Run</RailLink>
-                <RailLink to="settings" icon="⚙">Settings</RailLink>
+                <RailLink to="search" icon="⌕">
+                    Search
+                </RailLink>
+                <RailLink to="run" icon="▶">
+                    Run
+                </RailLink>
+                <RailLink to="settings" icon="⚙">
+                    Settings
+                </RailLink>
             </nav>
             <main class="view">
                 <CurrentView />

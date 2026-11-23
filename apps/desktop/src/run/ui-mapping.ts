@@ -1,10 +1,37 @@
 // Core's run results → the Run view's types (packages/ipc). Pure, so it is unit-tested. Seller names stay
 // in main: the UI only learns whether an item has a buy link.
 
-import { buyLink } from '@poe-upgrade-finder/core';
-import type { CheckResult, EvaluatedItem, FilteredItem, PobStats, PriceBand, RunResult, SearchRecord } from '@poe-upgrade-finder/core';
+import { buyLink, isEmptyPlan } from '@poe-upgrade-finder/core';
+import type {
+    CheckResult,
+    DefenceMatch,
+    EvaluatedItem,
+    ExclusionMatch,
+    FilteredItem,
+    LevelFilter,
+    MatchedLine,
+    PlanMatch,
+    PobStats,
+    PriceBand,
+    RequirementMatch,
+    RunResult,
+    SearchRecord,
+    SlotPlan,
+    SlotSearchSpec,
+} from '@poe-upgrade-finder/core';
 import { statChanges } from './stat-changes.ts';
-import type { LimitPanel, LimitPolicy, RunSummaryUi, UiBand, UiItem, UiSearch } from '@poe-upgrade-finder/ipc';
+import type {
+    LimitPanel,
+    LimitPolicy,
+    RunSummaryUi,
+    UiBand,
+    UiItem,
+    UiPlanCheck,
+    UiPlanLine,
+    UiPlanRule,
+    UiRunPlan,
+    UiSearch,
+} from '@poe-upgrade-finder/ipc';
 import type { PolicySnapshot, TradePolicy } from '@poe-upgrade-finder/trade';
 
 function pct(n: number): number | null {
@@ -12,6 +39,104 @@ function pct(n: number): number | null {
 }
 
 const details = (checks: readonly CheckResult[]): string[] => checks.map((c: CheckResult) => c.detail);
+
+/** A spec label for the Run view: "Required: X (≥ 30) (counts Y), from plan" → { label: "X (≥ 30)", counts: "Y" }. */
+export function planRule(specLabel: string): UiPlanRule {
+    const s: string = specLabel.replace(/^(?:Required|Excluded): /, '').replace(/, from (?:plan|strip)$/, '');
+    const m: RegExpExecArray | null = /^(.*) \(counts (.*)\)$/.exec(s);
+    return m === null ? { label: s, counts: null } : { label: m[1] ?? s, counts: m[2] ?? null };
+}
+
+/** 34 → "34", 32.5 → "32.5". */
+function num(n: number): string {
+    return Number.isInteger(n) ? String(n) : n.toFixed(1);
+}
+
+function planLine(l: MatchedLine): UiPlanLine {
+    const notes: string[] = [];
+    if (l.kind !== 'explicit') {
+        notes.push(l.kind);
+    }
+    if (l.factor !== 1) {
+        notes.push(l.factor === 0.5 ? 'half' : `× ${l.factor}`);
+    }
+    return { text: l.text, note: notes.join(', ') };
+}
+
+function requirementCheck(r: RequirementMatch): UiPlanCheck {
+    return {
+        kind: r.origin === 'plan' ? 'include' : 'need',
+        label: planRule(r.label).label,
+        status: r.status,
+        value: r.total === null ? null : `total ${num(r.total)}`,
+        lines: r.lines.map(planLine),
+    };
+}
+
+function exclusionCheck(e: ExclusionMatch): UiPlanCheck {
+    return { kind: 'exclude', label: planRule(e.label).label, status: e.status, value: null, lines: e.lines.map(planLine) };
+}
+
+/**
+ * A defence's value as the site compares it (decision 19): an item below 20% quality is raised to 20%, so a
+ * 0%-quality item listed at 418 Armour reads "418 listed at 0% quality, 502 at 20%" and passes a min of 500.
+ */
+export function defenceValue(d: Pick<DefenceMatch, 'listed' | 'quality' | 'compared'>): string | null {
+    if (d.listed === null || d.compared === null) {
+        return null;
+    }
+    if (d.listed === 0) {
+        return 'none on the item';
+    }
+    if (d.listed > 0 && d.quality < 20) {
+        return `${d.listed} listed at ${d.quality}% quality, ${Math.round(d.compared)} at 20%`;
+    }
+    return d.quality > 0 ? `${d.listed} at ${d.quality}% quality` : String(d.listed);
+}
+
+function defenceCheck(d: DefenceMatch): UiPlanCheck {
+    return { kind: 'defence', label: planRule(d.label).label, status: d.status, value: defenceValue(d), lines: [] };
+}
+
+/** The plan's includes first, then the build's hard needs, the excludes and the defences. */
+export function planChecks(m: PlanMatch): UiPlanCheck[] {
+    const requirements: UiPlanCheck[] = m.requirements.map(requirementCheck);
+    return [
+        ...requirements.filter((c: UiPlanCheck) => c.kind === 'include'),
+        ...requirements.filter((c: UiPlanCheck) => c.kind === 'need'),
+        ...m.exclusions.map(exclusionCheck),
+        ...m.defences.map(defenceCheck),
+    ];
+}
+
+/** The Run header's view of the slot plan; null for an empty plan (searched as v0.1). */
+export function toUiRunPlan(plan: SlotPlan, spec: SlotSearchSpec, notes: readonly string[]): UiRunPlan | null {
+    if (isEmptyPlan(plan)) {
+        return null;
+    }
+    return {
+        itemType: plan.itemType,
+        base: spec.baseType,
+        includes: spec.requirements.filter((r) => r.origin === 'plan').map((r) => planRule(r.label)),
+        excludes: spec.exclusions.map((e) => planRule(e.label).label),
+        defences: spec.defences.map((d) => planRule(d.label).label),
+        influences: [...spec.influences],
+        pruned: spec.pruned.length,
+        notes: [...notes],
+    };
+}
+
+/** The level requirement filter as searched (issue #22). */
+export function levelFilterLabel(filter: LevelFilter, maxLevel: number | undefined): string {
+    switch (filter.kind) {
+        case 'off':
+            return 'Any level';
+        case 'max':
+            return `Up to level ${filter.level}`;
+        case 'character':
+            return maxLevel === undefined ? 'Up to your level' : `Up to level ${maxLevel} (your level)`;
+    }
+}
 
 export function toUiItem(e: EvaluatedItem, league: string, baseline: PobStats, filtered?: FilteredItem): UiItem {
     const i = e.item;
@@ -35,6 +160,7 @@ export function toUiItem(e: EvaluatedItem, league: string, baseline: PobStats, f
         text: i.text,
         view: i.display ?? null,
         changes: statChanges(baseline, e.scored.stats),
+        planChecks: planChecks(e.plan),
         hasBuyLink: buyLink(league, i) !== undefined,
         hidden: filtered?.hidden ?? null,
         hiddenBy: filtered?.hiddenBy ?? null,
@@ -56,7 +182,14 @@ export function toUiSearch(s: SearchRecord): UiSearch {
     };
 }
 
-export function toUiSummary(result: RunResult, league: string, baseline: PobStats, finishedAtMs: number, startedAtMs: number, runFile: string | null): RunSummaryUi {
+export function toUiSummary(
+    result: RunResult,
+    league: string,
+    baseline: PobStats,
+    finishedAtMs: number,
+    startedAtMs: number,
+    runFile: string | null,
+): RunSummaryUi {
     const v = result.verdict;
     return {
         verdict: v.kind,

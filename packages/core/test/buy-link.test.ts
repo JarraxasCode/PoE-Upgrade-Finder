@@ -8,7 +8,12 @@ function query(link: string | undefined): unknown {
 }
 
 test('a buy link pins the listing: seller, base, exact price and item level', () => {
-    const link: string | undefined = buyLink('Covens of Umbra', { seller: 'exampleseller#1234', baseType: 'Amethyst Ring', itemLevel: 83, price: { amount: 170, currency: 'chaos' } });
+    const link: string | undefined = buyLink('Covens of Umbra', {
+        seller: 'exampleseller#1234',
+        baseType: 'Amethyst Ring',
+        itemLevel: 83,
+        price: { amount: 170, currency: 'chaos' },
+    });
     assert.equal(new URL(link ?? '').pathname, '/trade/search/Covens%20of%20Umbra');
     assert.deepEqual(query(link), {
         query: {
@@ -24,13 +29,22 @@ test('a buy link pins the listing: seller, base, exact price and item level', ()
 });
 
 test('the item mod lines are required, presence only', () => {
-    const q = query(buyLink('Covens', { seller: 'S', baseType: 'Amethyst Ring', statIds: ['explicit.stat_2144192055', 'crafted.stat_3299347043'] }));
-    assert.deepEqual((q as { query: { stats: unknown } }).query.stats, [{ type: 'and', filters: [{ id: 'explicit.stat_2144192055' }, { id: 'crafted.stat_3299347043' }] }]);
+    const q = query(
+        buyLink('Covens', { seller: 'S', baseType: 'Amethyst Ring', statIds: ['explicit.stat_2144192055', 'crafted.stat_3299347043'] }),
+    );
+    assert.deepEqual((q as { query: { stats: unknown } }).query.stats, [
+        { type: 'and', filters: [{ id: 'explicit.stat_2144192055' }, { id: 'crafted.stat_3299347043' }] },
+    ]);
 });
 
 test('without a price in chaos or divines, or an item level, those filters are left out', () => {
     assert.deepEqual(query(buyLink('Covens', { seller: 'S', baseType: 'X', price: { amount: 2, currency: 'exalted' } })), {
-        query: { status: { option: 'any' }, type: 'X', stats: [{ type: 'and', filters: [] }], filters: { trade_filters: { filters: { account: { input: 'S' } } } } },
+        query: {
+            status: { option: 'any' },
+            type: 'X',
+            stats: [{ type: 'and', filters: [] }],
+            filters: { trade_filters: { filters: { account: { input: 'S' } } } },
+        },
     });
     assert.equal(buyLink('Covens', { seller: undefined, baseType: 'X' }), undefined);
 });

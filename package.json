@@ -1,6 +1,6 @@
 {
   "name": "poe-upgrade-finder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Finds rare gear upgrades for a Path of Building build on the official trade site and scores them in headless PoB.",
   "license": "UNLICENSED",
@@ -22,11 +22,14 @@
     "app": "node tools/build-ui/build.ts && electron apps/desktop",
     "package": "node tools/package/package.ts",
     "pob-update": "node tools/pob-update/main.ts",
-    "icon": "electron tools/icon/build.ts"
+    "icon": "electron tools/icon/build.ts",
+    "format": "prettier --write .",
+    "format:check": "prettier --check ."
   },
   "devDependencies": {
     "@types/node": "26.6.6",
     "esbuild": "0.28.2",
+    "prettier": "3.9.10",
     "typescript": "7.0.2"
   }
 }

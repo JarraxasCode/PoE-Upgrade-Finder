@@ -36,7 +36,12 @@ function unzip(buffer: Buffer): Map<string, Buffer> {
 test('zip: entries come back byte for byte with matching CRCs', () => {
     const a: Buffer = Buffer.from('{"t":1}\n'.repeat(500));
     const b: Buffer = Buffer.from('');
-    const files: Map<string, Buffer> = unzip(zip([{ name: 'logs/app.jsonl', data: a }, { name: 'empty.txt', data: b }]));
+    const files: Map<string, Buffer> = unzip(
+        zip([
+            { name: 'logs/app.jsonl', data: a },
+            { name: 'empty.txt', data: b },
+        ]),
+    );
     assert.deepEqual([...files.keys()], ['logs/app.jsonl', 'empty.txt']);
     assert.ok(files.get('logs/app.jsonl')?.equals(a));
     assert.equal(files.get('empty.txt')?.length, 0);
@@ -45,7 +50,10 @@ test('zip: entries come back byte for byte with matching CRCs', () => {
 test('zip: an entry deflate cannot shrink is stored, and comes back the same', () => {
     const noise: Buffer = randomBytes(4096);
     const text: Buffer = Buffer.from('a'.repeat(4096));
-    const out: Buffer = zip([{ name: 'noise.bin', data: noise }, { name: 'text.txt', data: text }]);
+    const out: Buffer = zip([
+        { name: 'noise.bin', data: noise },
+        { name: 'text.txt', data: text },
+    ]);
     assert.ok(out.length < noise.length + 4096, 'text deflated');
     assert.equal(out.readUInt16LE(8), 0, 'first entry stored');
     const files: Map<string, Buffer> = unzip(out);

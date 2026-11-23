@@ -67,7 +67,9 @@ export function readDigest(value: unknown, league: string): DigestReading {
     }
     const wanted: string = `${CHAOS_ITEM}|${DIVINE_ITEM}`;
     const reversed: string = `${DIVINE_ITEM}|${CHAOS_ITEM}`;
-    const index: number = markets.findIndex((m: unknown) => isRecord(m) && m['league'] === league && (m['market_id'] === wanted || m['market_id'] === reversed));
+    const index: number = markets.findIndex(
+        (m: unknown) => isRecord(m) && m['league'] === league && (m['market_id'] === wanted || m['market_id'] === reversed),
+    );
     if (index < 0) {
         return { kind: 'no-market', league: league };
     }
@@ -225,29 +227,49 @@ export class DivineRateClient {
             if (reading?.kind === 'rate') {
                 const rate: DivineRate = { chaosPerDivine: reading.chaosPerDivine, source: 'ggg', hour: hour, at: this.now() };
                 this.store.set(league, rate);
-                this.logger.log('info', 'divine rate from GGG', { league: league, hour: hour, chaosPerDivine: rate.chaosPerDivine, chaos: reading.chaos, divine: reading.divine, steps: step + 1 });
+                this.logger.log('info', 'divine rate from GGG', {
+                    league: league,
+                    hour: hour,
+                    chaosPerDivine: rate.chaosPerDivine,
+                    chaos: reading.chaos,
+                    divine: reading.divine,
+                    steps: step + 1,
+                });
                 return { rate: rate, fetched: true, attempts: attempts };
             }
         }
-        this.logger.log('warn', 'no divine rate from GGG', { league: league, attempts: attempts, keeping: fallback?.chaosPerDivine ?? null });
+        this.logger.log('warn', 'no divine rate from GGG', {
+            league: league,
+            attempts: attempts,
+            keeping: fallback?.chaosPerDivine ?? null,
+        });
         return { rate: fallback, fetched: true, attempts: attempts };
     }
 
-    private async tryHour(hour: number, league: string, signal: AbortSignal | undefined): Promise<{ readonly attempt: HourAttempt; readonly reading?: DigestReading }> {
+    private async tryHour(
+        hour: number,
+        league: string,
+        signal: AbortSignal | undefined,
+    ): Promise<{ readonly attempt: HourAttempt; readonly reading?: DigestReading }> {
         const url: string = `${this.baseUrl}/${hour}`;
         const started: number = this.now();
-        const outcome: HttpOutcome = await this.limiter.schedule('ggg', url, async (): Promise<HttpOutcome> => {
-            const sent: HttpOutcome = await this.transport.send({
-                method: 'GET',
-                url: url,
-                headers: { 'User-Agent': this.userAgent, Accept: 'application/json' },
-                body: undefined,
-                timeoutMs: this.timeoutMs,
-                signal: signal,
-            });
-            this.limiter.update('ggg', sent.kind === 'response' ? sent.headers : {}, sent.kind === 'response' ? sent.status : 0);
-            return sent;
-        }, signal);
+        const outcome: HttpOutcome = await this.limiter.schedule(
+            'ggg',
+            url,
+            async (): Promise<HttpOutcome> => {
+                const sent: HttpOutcome = await this.transport.send({
+                    method: 'GET',
+                    url: url,
+                    headers: { 'User-Agent': this.userAgent, Accept: 'application/json' },
+                    body: undefined,
+                    timeoutMs: this.timeoutMs,
+                    signal: signal,
+                });
+                this.limiter.update('ggg', sent.kind === 'response' ? sent.headers : {}, sent.kind === 'response' ? sent.status : 0);
+                return sent;
+            },
+            signal,
+        );
         const base: Record<string, unknown> = { url: url, hour: hour, durationMs: this.now() - started };
         if (outcome.kind !== 'response') {
             this.logger.log('warn', `GET ${url} -> ${outcome.kind}`, base);
@@ -255,7 +277,10 @@ export class DivineRateClient {
         }
         if (outcome.status !== 200) {
             // A 404 is the unfinished hour (or no data); never cached, we step back.
-            this.logger.log(outcome.status === 404 ? 'info' : 'warn', `GET ${url} -> ${outcome.status}`, { ...base, status: outcome.status });
+            this.logger.log(outcome.status === 404 ? 'info' : 'warn', `GET ${url} -> ${outcome.status}`, {
+                ...base,
+                status: outcome.status,
+            });
             return { attempt: { hour: hour, status: outcome.status, result: 'http-error' } };
         }
         let reading: DigestReading;

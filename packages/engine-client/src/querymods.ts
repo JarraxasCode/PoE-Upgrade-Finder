@@ -7,7 +7,7 @@ import type { Readable } from 'node:stream';
 import { copyFileSync, mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { number, record, ValidationError } from '@poe-upgrade-finder/validate';
+import { number, record, toError, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
 import type { EnginePaths } from './config.ts';
 
@@ -40,7 +40,11 @@ export function readQueryModsReport(stdout: string): QueryModsReport {
     if ((entries['Explicit'] ?? 0) < 1000) {
         throw new ValidationError(`querymods: only ${entries['Explicit'] ?? 0} explicit families; refusing it`);
     }
-    return { seconds: number(r['seconds'], 'querymods.seconds'), entries: entries, unmatched: number(r['unmatched'], 'querymods.unmatched') };
+    return {
+        seconds: number(r['seconds'], 'querymods.seconds'),
+        entries: entries,
+        unmatched: number(r['unmatched'], 'querymods.unmatched'),
+    };
 }
 
 export function rebuildQueryMods(paths: EnginePaths, timeoutMs: number = 180_000): Promise<QueryModsReport> {
@@ -48,11 +52,19 @@ export function rebuildQueryMods(paths: EnginePaths, timeoutMs: number = 180_000
     const runtime: string = join(paths.pobDir, 'runtime');
     const script: string = join(paths.dispatcherPath, '..', 'querymods-rebuild.lua');
     return new Promise<QueryModsReport>((resolve: (r: QueryModsReport) => void, reject: (e: Error) => void) => {
-        const child: ChildProcessByStdio<null, Readable, Readable> = spawn(paths.luahostPath, [runtime, join(paths.pobDir, 'src'), script, outDir], {
-            env: { ...process.env, LUA_PATH: '../runtime/lua/?.lua;../runtime/lua/?/init.lua;./?.lua;;', LUA_CPATH: join(runtime, '?.dll') },
-            stdio: ['ignore', 'pipe', 'pipe'],
-            windowsHide: true,
-        });
+        const child: ChildProcessByStdio<null, Readable, Readable> = spawn(
+            paths.luahostPath,
+            [runtime, join(paths.pobDir, 'src'), script, outDir],
+            {
+                env: {
+                    ...process.env,
+                    LUA_PATH: '../runtime/lua/?.lua;../runtime/lua/?/init.lua;./?.lua;;',
+                    LUA_CPATH: join(runtime, '?.dll'),
+                },
+                stdio: ['ignore', 'pipe', 'pipe'],
+                windowsHide: true,
+            },
+        );
         let stdout: string = '';
         let stderr: string = '';
         child.stdout.on('data', (chunk: Buffer) => {
@@ -75,7 +87,9 @@ export function rebuildQueryMods(paths: EnginePaths, timeoutMs: number = 180_000
         child.on('close', (code: number | null) => {
             try {
                 if (code !== 0) {
-                    throw new Error(`QueryMods rebuild exited ${code ?? 'killed'}: ${(stderr || stdout).trim().split(/\r?\n/).slice(-3).join(' | ')}`);
+                    throw new Error(
+                        `QueryMods rebuild exited ${code ?? 'killed'}: ${(stderr || stdout).trim().split(/\r?\n/).slice(-3).join(' | ')}`,
+                    );
                 }
                 const report: QueryModsReport = readQueryModsReport(stdout);
                 copyFileSync(join(outDir, 'QueryMods.lua'), join(paths.pobDir, 'src', 'Data', 'QueryMods.lua'));
@@ -83,7 +97,7 @@ export function rebuildQueryMods(paths: EnginePaths, timeoutMs: number = 180_000
                 resolve(report);
             } catch (error: unknown) {
                 cleanUp();
-                reject(error instanceof Error ? error : new Error(String(error)));
+                reject(toError(error));
             }
         });
     });

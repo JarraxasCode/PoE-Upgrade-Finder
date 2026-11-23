@@ -2,7 +2,16 @@
 // the baseline line, and warnings. Pure, so it is unit-tested on recorded engine output.
 
 import { parseTarget } from '@poe-upgrade-finder/cli/args';
-import type { ActiveSkillInfo, EngineWarning, EquippedItem, LoadBuildData, ResolvedTarget, SocketGroupInfo, StatBlock, TargetRequest } from '@poe-upgrade-finder/engine-client';
+import type {
+    ActiveSkillInfo,
+    EngineWarning,
+    EquippedItem,
+    LoadBuildData,
+    ResolvedTarget,
+    SocketGroupInfo,
+    StatBlock,
+    TargetRequest,
+} from '@poe-upgrade-finder/engine-client';
 import type { BuildSummary, EquippedInfo, ItemView, TargetOption } from '@poe-upgrade-finder/ipc';
 import type { BaseArt } from './base-art.ts';
 
@@ -25,7 +34,9 @@ function skillLabel(skill: ActiveSkillInfo, part: string | undefined): string {
  * several). A label repeated across groups gets its group's slot or number.
  */
 export function targetOptions(skills: readonly SocketGroupInfo[], saved: ResolvedTarget): TargetOption[] {
-    const ticked: string[] = skills.filter((g: SocketGroupInfo) => g.enabled && g.includeInFullDPS).map((g: SocketGroupInfo) => g.activeSkills[0]?.name ?? g.name);
+    const ticked: string[] = skills
+        .filter((g: SocketGroupInfo) => g.enabled && g.includeInFullDPS)
+        .map((g: SocketGroupInfo) => g.activeSkills[0]?.name ?? g.name);
     const options: TargetOption[] = [
         { id: 'saved', label: `As saved in PoB: ${resolvedLabel(saved)}` },
         { id: 'full', label: ticked.length > 0 ? `Full DPS: ${ticked.join(' + ')}` : 'Full DPS (no groups ticked "Include in Full DPS")' },
@@ -83,14 +94,16 @@ export function equippedInfo(e: EquippedItem, art: ArtLookup): EquippedInfo {
         const a: BaseArt | undefined = art(baseName, rest.rarity === 'unique' ? rest.name : null);
         view = { ...rest, icon: a?.icon ?? null, width: a?.width ?? 1, height: a?.height ?? 1 };
     }
-    return { slot: e.slot, name: e.name, base: e.base, rarity: e.rarity, view: view };
+    return { slot: e.slot, name: e.name, base: e.base, rarity: e.rarity, itemType: e.type ?? null, view: view };
 }
 
 export function buildSummary(input: SummaryInput): BuildSummary {
     const { load, stats } = input;
     const warnings: string[] = input.warnings.map((w: EngineWarning) => w.message);
     if (!(stats.damage > 0)) {
-        warnings.push('The damage target reads 0 (for example an aura as the main skill). Pick the skill to measure under "Measure damage on".');
+        warnings.push(
+            'The damage target reads 0 (for example an aura as the main skill). Pick the skill to measure under "Measure damage on".',
+        );
     }
     return {
         buildId: input.buildId,

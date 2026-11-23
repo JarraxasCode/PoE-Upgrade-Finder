@@ -70,12 +70,16 @@ test('counts every request sent, even ones that failed', async () => {
     const clock: FakeClock = new FakeClock();
     const limiter: RateLimiter<TradePolicy> = makeLimiter(clock);
     limiter.update('search', searchHeaders(0, 0), 200);
-    await assert.rejects(limiter.schedule('search', 'a', async () => {
-        throw new Error('timeout');
-    }));
-    await assert.rejects(limiter.schedule('search', 'b', async () => {
-        throw new Error('timeout');
-    }));
+    await assert.rejects(
+        limiter.schedule('search', 'a', async () => {
+            throw new Error('timeout');
+        }),
+    );
+    await assert.rejects(
+        limiter.schedule('search', 'b', async () => {
+            throw new Error('timeout');
+        }),
+    );
     const decision: WaitDecision = limiter.computeWait('search');
     assert.equal(decision.waitMs, 5000);
 });
@@ -91,14 +95,20 @@ test('429 with a short Retry-After waits; a long one stops', async () => {
     assert.equal(clock.now() - before, 20000);
 
     limiter.update('search', searchHeaders(1, 1, { 'retry-after': '600' }), 429);
-    await assert.rejects(limiter.schedule('search', 's3', async () => null), RateLimitStop);
+    await assert.rejects(
+        limiter.schedule('search', 's3', async () => null),
+        RateLimitStop,
+    );
 });
 
 test('an active server restriction of 5 minutes or more stops the run', async () => {
     const clock: FakeClock = new FakeClock();
     const limiter: RateLimiter<TradePolicy> = makeLimiter(clock);
     limiter.update('search', { ...searchHeaders(3, 3), 'x-rate-limit-account-state': '4:5:600' }, 200);
-    await assert.rejects(limiter.schedule('search', 's', async () => null), RateLimitStop);
+    await assert.rejects(
+        limiter.schedule('search', 's', async () => null),
+        RateLimitStop,
+    );
 });
 
 test('a cancelled signal stops a waiting request before it is sent', async () => {
@@ -107,9 +117,17 @@ test('a cancelled signal stops a waiting request before it is sent', async () =>
     const controller: AbortController = new AbortController();
     controller.abort();
     let sent: boolean = false;
-    await assert.rejects(limiter.schedule('search', 's', async () => {
-        sent = true;
-    }, controller.signal), { name: 'CancelledError' });
+    await assert.rejects(
+        limiter.schedule(
+            'search',
+            's',
+            async () => {
+                sent = true;
+            },
+            controller.signal,
+        ),
+        { name: 'CancelledError' },
+    );
     assert.equal(sent, false);
 });
 
@@ -119,14 +137,16 @@ test('one request in flight at a time', async () => {
     let maxInFlight: number = 0;
     const tasks: Promise<void>[] = [];
     for (let i: number = 0; i < 5; i++) {
-        tasks.push(limiter.schedule(`k${i}`, 't', async () => {
-            inFlight++;
-            maxInFlight = Math.max(maxInFlight, inFlight);
-            await new Promise<void>((resolve: () => void) => {
-                setTimeout(resolve, 5);
-            });
-            inFlight--;
-        }));
+        tasks.push(
+            limiter.schedule(`k${i}`, 't', async () => {
+                inFlight++;
+                maxInFlight = Math.max(maxInFlight, inFlight);
+                await new Promise<void>((resolve: () => void) => {
+                    setTimeout(resolve, 5);
+                });
+                inFlight--;
+            }),
+        );
     }
     await Promise.all(tasks);
     assert.equal(maxInFlight, 1);
@@ -139,14 +159,24 @@ test('a sweep of 60 searches never exceeds 70% of any window', async () => {
     for (let i: number = 0; i < 60; i++) {
         await limiter.schedule('search', `s${i}`, async () => {
             sendTimes.push(clock.now());
-            limiter.update('search', {
-                'x-rate-limit-rules': 'Account,Ip',
-                'x-rate-limit-account': '3:5:60',
-                'x-rate-limit-ip': '8:10:60,15:60:120,60:300:1800,600:10800:3600',
-            }, 200);
+            limiter.update(
+                'search',
+                {
+                    'x-rate-limit-rules': 'Account,Ip',
+                    'x-rate-limit-account': '3:5:60',
+                    'x-rate-limit-ip': '8:10:60,15:60:120,60:300:1800,600:10800:3600',
+                },
+                200,
+            );
         });
     }
-    const windows: readonly (readonly [number, number])[] = [[5, 2], [10, 5], [60, 10], [300, 42], [10800, 420]];
+    const windows: readonly (readonly [number, number])[] = [
+        [5, 2],
+        [10, 5],
+        [60, 10],
+        [300, 42],
+        [10800, 420],
+    ];
     for (const [period, allowed] of windows) {
         for (const t of sendTimes) {
             const inWindow: number = sendTimes.filter((s: number) => s > t - period * 1000 && s <= t).length;
@@ -179,7 +209,11 @@ test('a full server count made of our own sends waits only until the oldest leav
     for (let i: number = 1; i <= 10; i++) {
         await limiter.schedule('search', `s${i}`, async () => {
             // As the site counts them: the 10 s window holds the last two sends, the longer ones all of them.
-            limiter.update('search', searchHeaders(1, i, { 'x-rate-limit-ip-state': `${Math.min(i, 2)}:10:0,${i}:60:0,${i}:300:0,${i}:10800:0` }), 200);
+            limiter.update(
+                'search',
+                searchHeaders(1, i, { 'x-rate-limit-ip-state': `${Math.min(i, 2)}:10:0,${i}:60:0,${i}:300:0,${i}:10800:0` }),
+                200,
+            );
         });
         clock.t += 6000;
     }

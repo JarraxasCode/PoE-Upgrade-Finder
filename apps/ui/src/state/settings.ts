@@ -5,7 +5,7 @@ import type { Signal } from '@preact/signals';
 import type { AppSettings } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import type { Loadable } from './loadable.ts';
-import { messageOf } from './loadable.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const appSettings: Signal<Loadable<AppSettings>> = signal<Loadable<AppSettings>>({ kind: 'loading' });
 

@@ -2,8 +2,8 @@
 // search for, what each item must pass and what to note. The query compiler, the scoring pipeline and the
 // UI only read the spec, so new options become new entries in it (from new sources), not new code paths.
 
-import type { GearSlot } from '@poe-upgrade-finder/engine-client';
-import type { ItemDisplay, ListingPrice, ListingStatus, StatGroupType } from '@poe-upgrade-finder/trade';
+import type { DefenceKind, GearSlot, SlotInfluence } from '@poe-upgrade-finder/engine-client';
+import type { ItemDisplay, ListingPrice, ListingStatus, StatGroupType, StatLine } from '@poe-upgrade-finder/trade';
 import type { PriceBand } from './bands.ts';
 import type { FloorSettings } from './floors.ts';
 import type { PobStats } from './stats.ts';
@@ -20,10 +20,50 @@ export interface SearchRequirement {
     readonly statId: string;
     readonly min?: number;
     readonly max?: number;
-    /** v1 only produces 'strip'. */
-    readonly origin: 'strip' | 'user';
+    /** 'strip': the build's hard needs; 'plan': the slot plan's includes (v0.2). */
+    readonly origin: 'strip' | 'plan';
     /** For the Run view: "Required: cold res ≥ 41, from strip". */
     readonly label: string;
+    /** The site's wording of the stat, when known: tells which way a "reduced" line counts (issue #6). */
+    readonly siteText?: string;
+    /** The label's range is the negative of the site's (a "reduced" include on an "increased" stat, decision 11). */
+    readonly negated?: boolean;
+}
+
+/** A stat no result may have (the slot plan's excludes), compiled to a Not group. */
+export interface SearchExclusion {
+    readonly statId: string;
+    readonly origin: 'plan';
+    /** "Excluded: #% increased Rarity of Items found, from plan". */
+    readonly label: string;
+}
+
+/** A range on one of the item's defences (the slot plan's, issue #24), compiled to the site's armour filters. */
+export interface SearchDefence {
+    readonly defence: DefenceKind;
+    readonly min?: number;
+    readonly max?: number;
+    readonly origin: 'plan';
+    /** "Energy Shield ≤ 0, from plan". */
+    readonly label: string;
+}
+
+/** Why the slot plan took a weight out of the weighted group (PLAN.md, "v2a: the slot plan"). */
+export type PruneReason =
+    | 'excluded'
+    | 'included'
+    | 'base-cannot-roll'
+    | 'same-group'
+    | 'prefixes-full'
+    | 'suffixes-full'
+    | 'affixes-full'
+    | 'no-room'
+    | 'defences';
+
+export interface PrunedWeight extends WeightedStat {
+    readonly reason: PruneReason;
+    /** For the weight review: "Sorcerer Boots can't roll it". */
+    readonly text: string;
 }
 
 export type CheckKind = 'floor' | 'target' | 'flag';
@@ -57,6 +97,8 @@ export interface ListedItem {
     readonly itemLevel: number | undefined;
     /** The item's own mod lines as trade stat ids (for the buy link). */
     readonly statIds: readonly string[];
+    /** Every mod line with its stat, implicits included (which lines met the plan); missing when unknown. */
+    readonly statLines?: readonly StatLine[] | undefined;
     readonly seller: string | undefined;
     readonly price: ListingPrice | undefined;
     /** The price in chaos at the run's divine rate; undefined for other currencies (flagged, not converted). */
@@ -100,15 +142,44 @@ export interface SlotSearchSpec {
     readonly listingType: ListingStatus;
     /** Trade category, from PoB's generator for the slot's item (e.g. "armour.boots"). */
     readonly category: string;
-    /** Items must be equippable at this level (req_filters), when known. */
-    readonly characterLevel: number | undefined;
+    /** The highest level requirement a result may have (req_filters), from the build's level filter; undefined: none. */
+    readonly maxLevelRequirement: number | undefined;
     readonly priceBands: readonly PriceBand[];
+    /** The site's name for one base (the slot plan's base); null: any base. */
+    readonly baseType: string | null;
     readonly requirements: readonly SearchRequirement[];
-    /** In priority order (PoB's: by gain at a mid roll). v1: PoB's generator. */
+    readonly exclusions: readonly SearchExclusion[];
+    /** Ranges on the item's defences (the slot plan's). */
+    readonly defences: readonly SearchDefence[];
+    /** Influences the item must have (from the plan's influenced includes), at most two. */
+    readonly influences: readonly SlotInfluence[];
+    /** In priority order (PoB's: by gain at a mid roll). v1: PoB's generator. After the plan's pruning. */
     readonly weights: readonly WeightedStat[];
+    /** Weights the slot plan took out, each with its reason. */
+    readonly pruned: readonly PrunedWeight[];
     readonly weightGroupType: Extract<StatGroupType, 'weight' | 'weight2'>;
     readonly checks: readonly ItemCheck[];
     readonly noters: readonly ItemNoter[];
+}
+
+/**
+ * The level requirement filter (issue #22): up to the character's level (the default, as in v1), none, or up to a
+ * level the user sets (to buy ahead of levelling, or to stay under a lower one).
+ */
+export type LevelFilter = { readonly kind: 'character' } | { readonly kind: 'off' } | { readonly kind: 'max'; readonly level: number };
+
+export const DEFAULT_LEVEL_FILTER: LevelFilter = { kind: 'character' };
+
+/** The highest level requirement to search for, or undefined for no filter (or an unknown character level). */
+export function maxLevelRequirement(characterLevel: number | undefined, filter: LevelFilter = DEFAULT_LEVEL_FILTER): number | undefined {
+    switch (filter.kind) {
+        case 'off':
+            return undefined;
+        case 'max':
+            return filter.level;
+        case 'character':
+            return characterLevel;
+    }
 }
 
 /** Everything a source may read to fill the spec for one run. */
@@ -117,6 +188,8 @@ export interface RunContext {
     readonly listingType: ListingStatus;
     readonly priceBands: readonly PriceBand[];
     readonly characterLevel: number | undefined;
+    /** The level requirement filter; missing: up to the character's level. */
+    readonly levelFilter?: LevelFilter | undefined;
     /** The build as it is (current item equipped), with the run's damage target. */
     readonly baseline: PobStats;
     /** The build with the slot empty. */
@@ -162,10 +235,15 @@ export interface SavedSpec {
     readonly slot: SlotId;
     readonly listingType: ListingStatus;
     readonly category: string;
-    readonly characterLevel: number | undefined;
+    readonly maxLevelRequirement: number | undefined;
     readonly priceBands: readonly PriceBand[];
+    readonly baseType: string | null;
     readonly requirements: readonly SearchRequirement[];
+    readonly exclusions: readonly SearchExclusion[];
+    readonly defences: readonly SearchDefence[];
+    readonly influences: readonly SlotInfluence[];
     readonly weights: readonly WeightedStat[];
+    readonly pruned: readonly PrunedWeight[];
     readonly weightGroupType: string;
     readonly checks: readonly { readonly id: string; readonly kind: CheckKind; readonly label: string }[];
     readonly noters: readonly string[];
@@ -176,10 +254,15 @@ export function saveSpec(spec: SlotSearchSpec): SavedSpec {
         slot: spec.slot,
         listingType: spec.listingType,
         category: spec.category,
-        characterLevel: spec.characterLevel,
+        maxLevelRequirement: spec.maxLevelRequirement,
         priceBands: spec.priceBands,
+        baseType: spec.baseType,
         requirements: spec.requirements,
+        exclusions: spec.exclusions,
+        defences: spec.defences,
+        influences: spec.influences,
         weights: spec.weights,
+        pruned: spec.pruned,
         weightGroupType: spec.weightGroupType,
         checks: spec.checks.map((c: ItemCheck) => ({ id: c.id, kind: c.kind, label: c.label })),
         noters: spec.noters.map((n: ItemNoter) => n.id),
@@ -218,15 +301,23 @@ export class SpecBuilder {
             noters.push(...source.notersFor(context));
         }
         const edited: WeightedStat[] = applyWeightEdits(weights, context.weightEdits);
-        const groupType: string | undefined = context.pobQuery.query.stats.find((g: { readonly type: string }) => g.type === 'weight' || g.type === 'weight2')?.type;
+        const groupType: string | undefined = context.pobQuery.query.stats.find(
+            (g: { readonly type: string }) => g.type === 'weight' || g.type === 'weight2',
+        )?.type;
         return {
             slot: context.slot,
             listingType: context.listingType,
             category: context.pobQuery.category.query,
-            characterLevel: context.characterLevel,
+            maxLevelRequirement: maxLevelRequirement(context.characterLevel, context.levelFilter),
             priceBands: context.priceBands,
+            // The slot plan fills these (buildSlotSpec); the plain builder searches as v0.1 did.
+            baseType: null,
             requirements: requirements,
+            exclusions: [],
+            defences: [],
+            influences: [],
             weights: edited,
+            pruned: [],
             weightGroupType: groupType === 'weight2' ? 'weight2' : 'weight',
             checks: checks,
             noters: noters,
