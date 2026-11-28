@@ -96,14 +96,24 @@ export function Verdict(props: {
                             {gainText((best.gainPct ?? 0) - (pick.gainPct ?? 0)).replace('+', '')} less gain
                         </Reason>
                     )}
-                {!isPick && (
+                {!isPick && best === undefined && (
+                    <Reason
+                        tipKey="why-none"
+                        tone="warn"
+                        label="Why"
+                        lines={['What happened to the listings in budget. The run summary has the counts.']}
+                    >
+                        {summary.note.replace(/^No upgrade found: /, '').replace(/\.$/, '')}
+                    </Reason>
+                )}
+                {!isPick && best !== undefined && (
                     <Reason
                         tipKey="why-min"
                         tone="warn"
                         label="Minimum"
                         lines={[`Items need at least +${h.minGainPct}% overall to count as an upgrade. Change it in Settings.`]}
                     >
-                        {best === undefined ? 'nothing in budget passed the floors' : `needs +${h.minGainPct}% overall`}
+                        needs +{h.minGainPct}% overall
                     </Reason>
                 )}
                 {over > 0 && (

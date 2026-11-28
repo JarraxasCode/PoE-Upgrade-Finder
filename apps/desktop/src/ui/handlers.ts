@@ -12,8 +12,8 @@ import type {
     BuildSettings,
     BuildsList,
     BuildSummary,
-    GearSlot,
     LimitPanel,
+    UniqueList,
     WeightPreview,
     LogsView,
     RateState,
@@ -23,7 +23,6 @@ import type {
     RunSnapshot,
     SignInState,
     SlotEditorData,
-    SlotPlan,
 } from '@poe-upgrade-finder/ipc';
 import { UserFacingError } from './ipc-server.ts';
 import type { Handlers } from './ipc-server.ts';
@@ -36,9 +35,11 @@ import type { PobRebuild, PobSmokeCheck, PobUpdates } from '../services/pob-upda
 import { launchedByLauncher, localAppFolder, pobLicenseOf, pobVersionOf, writeRemoveMarker } from '../services/remove.ts';
 import { dayStamp } from '@poe-upgrade-finder/logging';
 import type { SettingsStore } from '../services/settings-store.ts';
-import { slotEditorData } from '../services/slot-data.ts';
 import type { SlotDataService } from '../services/slot-data.ts';
+import type { UniqueService } from '../services/uniques.ts';
+import type { WeightService } from '../services/weights.ts';
 import type { TradeServices } from '../services/trade-services.ts';
+import type { GearSlot, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 export interface AppServices {
     readonly appVersion: string;
@@ -64,6 +65,10 @@ export interface AppServices {
     readonly trade: TradeServices;
     /** PoB's mods per item type (cached), for the slot plan editor and runs. */
     readonly slotData: SlotDataService;
+    /** The weights and the weight review (PoB's generator, cached). */
+    readonly weights: WeightService;
+    /** The uniques for a slot's item type, for the unique picker (#113). */
+    readonly uniques: UniqueService;
     readonly runs: () => RunController;
     readonly window: () => BrowserWindow | undefined;
     /** The Builds folder setting changed: watch the new folder and tell the renderer. */
@@ -192,17 +197,24 @@ export function createHandlers(services: AppServices): Handlers {
             readonly slot: GearSlot;
             readonly target: string;
             readonly plan: SlotPlan | null;
-        }): Promise<WeightPreview> => services.runs().previewWeights(params.buildId, params.slot, params.target, params.plan),
+        }): Promise<WeightPreview> => services.weights.preview(params.buildId, params.slot, params.target, params.plan),
+        'uniques.list': (params: {
+            readonly buildId: string;
+            readonly slot: GearSlot;
+            readonly target: string;
+            readonly itemType: string;
+        }): Promise<UniqueList> => services.uniques.list(params.buildId, params.slot, params.target, params.itemType),
 
         'slot.data': async (params: {
             readonly slot: GearSlot;
             readonly itemType: string;
             readonly base: string | null;
         }): Promise<SlotEditorData> => {
-            const data = await services.slotData.get(params.itemType);
             // The site's pseudo stats for the Totals list (issue #26); the cached stat list, fetched once a week.
             const catalog = await trade.catalog();
-            return slotEditorData(data, params.slot, params.base, catalog?.pseudoStats() ?? [], (id: string) => catalog?.rank(id));
+            return services.slotData.editorData(params.slot, params.itemType, params.base, catalog?.pseudoStats() ?? [], (id: string) =>
+                catalog?.rank(id),
+            );
         },
 
         'signin.status': (): Promise<SignInState> => Promise.resolve(trade.signInState),

@@ -6,12 +6,13 @@ import { useEffect, useRef, useState } from 'preact/hooks';
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
 import type { JSX, TargetedEvent } from 'preact';
-import { ELEMENTS } from '@poe-upgrade-finder/ipc';
-import type { BuildSettings, Element, FloorSettings } from '@poe-upgrade-finder/ipc';
+import type { BuildSettings } from '@poe-upgrade-finder/ipc';
 import { parseNumberText, setBool, setMaxResMin, setNumber, setTargetMaxRes, setTargetNumber } from '../floors-form.ts';
 import type { BoolFloor } from '../floors-form.ts';
 import { updateBuildSettings } from '../state/builds.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import { ELEMENTS } from '@poe-upgrade-finder/vocab';
+import type { Element, FloorSettings } from '@poe-upgrade-finder/vocab';
 
 type SaveState =
     | { readonly kind: 'idle' }

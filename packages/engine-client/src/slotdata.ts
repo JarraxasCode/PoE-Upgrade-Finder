@@ -2,16 +2,10 @@
 // Phase 6): what can roll on each base of one base type, from PoB's own mod data. Checked here as it
 // comes in, like every engine message.
 
-import { array, boolean, isRecord, number, oneOf, ProtocolError, record, string } from './check.ts';
+import { boolean, luaArray, number, oneOf, ProtocolError, record, string } from './check.ts';
 import type { JsonRecord } from './check.ts';
-
-/** PoB's mod types in the slot data: affixes, eldritch implicits (Exarch, Eater) and corrupted implicits. */
-export type SlotModType = 'Prefix' | 'Suffix' | 'Exarch' | 'Eater' | 'Corrupted';
-export const SLOT_MOD_TYPES: readonly SlotModType[] = ['Prefix', 'Suffix', 'Exarch', 'Eater', 'Corrupted'];
-
-/** PoB's influence names (adjudicator = Warlord, basilisk = Hunter, eyrie = Redeemer); `none` is the plain pool. */
-export type SlotInfluence = 'none' | 'shaper' | 'elder' | 'adjudicator' | 'basilisk' | 'crusader' | 'eyrie';
-export const SLOT_INFLUENCES: readonly SlotInfluence[] = ['none', 'shaper', 'elder', 'adjudicator', 'basilisk', 'crusader', 'eyrie'];
+import { DEFENCE_KINDS, SLOT_INFLUENCES, SLOT_MOD_TYPES, SLOT_SOURCES } from '@poe-upgrade-finder/vocab';
+import type { DefenceKind, SlotInfluence, SlotModType, SlotSource } from '@poe-upgrade-finder/vocab';
 
 /** One trade stat a mod carries, in the site's terms. */
 export interface SlotModStat {
@@ -41,24 +35,6 @@ export interface SlotMod {
 }
 
 /** Every tier of one mod: same type, PoB mod group and trade ids. */
-/**
- * Where a family's mods come from (issue #32), as PoB's "Add modifier" screen has them: natural rolls, fossil
- * (a natural Delve-only affix), the crafting bench, essence-only mods, veiled (Betrayal), beastcrafts,
- * Necropolis corpses, and Delve or Incursion drop-restricted mods.
- */
-export type SlotSource = 'natural' | 'fossil' | 'crafted' | 'essence' | 'veiled' | 'beast' | 'necropolis' | 'delve' | 'incursion';
-export const SLOT_SOURCES: readonly SlotSource[] = [
-    'natural',
-    'fossil',
-    'crafted',
-    'essence',
-    'veiled',
-    'beast',
-    'necropolis',
-    'delve',
-    'incursion',
-];
-
 export interface SlotFamily {
     readonly type: SlotModType;
     readonly group: string;
@@ -76,10 +52,6 @@ export interface SlotImplicit {
     readonly lines: readonly string[];
     readonly stats: readonly SlotModStat[];
 }
-
-/** The defences a base can have, as the slot plan names them. */
-export type DefenceKind = 'armour' | 'evasion' | 'energyShield' | 'ward';
-export const DEFENCE_KINDS: readonly DefenceKind[] = ['armour', 'evasion', 'energyShield', 'ward'];
 
 export interface SlotBase {
     /** PoB's name, e.g. "Two-Toned Boots (Armour/Evasion)". */
@@ -121,14 +93,6 @@ export interface BaseTypeInfo {
     readonly bases: number;
 }
 
-// Lua encodes an empty array as {}.
-function list<T>(value: unknown, path: string, read: (v: unknown, p: string) => T): readonly T[] {
-    if (isRecord(value) && Object.keys(value).length === 0) {
-        return [];
-    }
-    return array(value, path, read);
-}
-
 function index(value: unknown, path: string, size: number): number {
     const n: number = number(value, path);
     if (!Number.isInteger(n) || n < 0 || n >= size) {
@@ -141,7 +105,7 @@ function readRange(value: unknown, path: string): readonly [number, number] | un
     if (value === undefined || value === null) {
         return undefined;
     }
-    const pair: readonly number[] = array(value, path, number);
+    const pair: readonly number[] = luaArray(value, path, number);
     const lo: number | undefined = pair[0];
     const hi: number | undefined = pair[1];
     if (pair.length !== 2 || lo === undefined || hi === undefined || lo > hi) {
@@ -165,8 +129,8 @@ function readStat(lineCount: number): (value: unknown, path: string) => SlotModS
 }
 
 function readLinesAndStats(r: JsonRecord, path: string): { readonly lines: readonly string[]; readonly stats: readonly SlotModStat[] } {
-    const lines: readonly string[] = list(r['lines'], `${path}.lines`, string);
-    return { lines: lines, stats: list(r['stats'], `${path}.stats`, readStat(lines.length)) };
+    const lines: readonly string[] = luaArray(r['lines'], `${path}.lines`, string);
+    return { lines: lines, stats: luaArray(r['stats'], `${path}.stats`, readStat(lines.length)) };
 }
 
 function readFamily(value: unknown, path: string): SlotFamily {
@@ -176,9 +140,9 @@ function readFamily(value: unknown, path: string): SlotFamily {
         group: string(r['group'], `${path}.group`),
         source: r['source'] === undefined ? 'natural' : oneOf(r['source'], `${path}.source`, SLOT_SOURCES),
         text: string(r['text'], `${path}.text`),
-        tradeIds: list(r['tradeIds'], `${path}.tradeIds`, string),
-        siteTexts: list(r['siteTexts'], `${path}.siteTexts`, string),
-        tiers: list(r['tiers'], `${path}.tiers`, string),
+        tradeIds: luaArray(r['tradeIds'], `${path}.tradeIds`, string),
+        siteTexts: luaArray(r['siteTexts'], `${path}.siteTexts`, string),
+        tiers: luaArray(r['tiers'], `${path}.tiers`, string),
     };
 }
 
@@ -207,9 +171,9 @@ function readBase(poolCount: number): (value: unknown, path: string) => SlotBase
             tradeType: string(r['tradeType'], `${path}.tradeType`),
             subType: subType === undefined || subType === null ? undefined : string(subType, `${path}.subType`),
             level: number(r['level'], `${path}.level`),
-            tags: list(r['tags'], `${path}.tags`, string),
+            tags: luaArray(r['tags'], `${path}.tags`, string),
             defences: defences,
-            implicits: list(r['implicits'], `${path}.implicits`, (v: unknown, p: string): SlotImplicit => {
+            implicits: luaArray(r['implicits'], `${path}.implicits`, (v: unknown, p: string): SlotImplicit => {
                 const i: JsonRecord = record(v, p);
                 return { modId: string(i['modId'], `${p}.modId`), ...readLinesAndStats(i, p) };
             }),
@@ -222,7 +186,7 @@ function readBase(poolCount: number): (value: unknown, path: string) => SlotBase
 export function readSlotData(value: unknown): SlotData {
     const path: string = 'slotData';
     const r: JsonRecord = record(value, path);
-    const families: readonly SlotFamily[] = list(r['families'], `${path}.families`, readFamily);
+    const families: readonly SlotFamily[] = luaArray(r['families'], `${path}.families`, readFamily);
     const modsIn: JsonRecord = record(r['mods'], `${path}.mods`);
     const mods: Record<string, SlotMod> = {};
     for (const [modId, v] of Object.entries(modsIn)) {
@@ -246,20 +210,20 @@ export function readSlotData(value: unknown): SlotData {
     families.forEach((f: SlotFamily, i: number) => {
         f.tiers.forEach((t: string, j: number) => known(t, `${path}.families[${i}].tiers[${j}]`));
     });
-    const pools: readonly (readonly string[])[] = list(r['pools'], `${path}.pools`, (v: unknown, p: string) => list(v, p, known));
+    const pools: readonly (readonly string[])[] = luaArray(r['pools'], `${path}.pools`, (v: unknown, p: string) => luaArray(v, p, known));
     return {
         pobVersion: string(r['pobVersion'], `${path}.pobVersion`),
         baseType: string(r['baseType'], `${path}.baseType`),
-        bases: list(r['bases'], `${path}.bases`, readBase(pools.length)),
+        bases: luaArray(r['bases'], `${path}.bases`, readBase(pools.length)),
         pools: pools,
         families: families,
         mods: mods,
-        unmatched: list(r['unmatched'], `${path}.unmatched`, (v: unknown, p: string): SlotUnmatched => {
+        unmatched: luaArray(r['unmatched'], `${path}.unmatched`, (v: unknown, p: string): SlotUnmatched => {
             const u: JsonRecord = record(v, p);
             return {
                 modId: string(u['modId'], `${p}.modId`),
                 type: oneOf(u['type'], `${p}.type`, SLOT_MOD_TYPES),
-                lines: list(u['lines'], `${p}.lines`, string),
+                lines: luaArray(u['lines'], `${p}.lines`, string),
             };
         }),
         seconds: number(r['seconds'], `${path}.seconds`),
@@ -269,7 +233,7 @@ export function readSlotData(value: unknown): SlotData {
 export function readBaseTypes(value: unknown): { readonly types: readonly BaseTypeInfo[] } {
     const r: JsonRecord = record(value, 'baseTypes');
     return {
-        types: list(r['types'], 'baseTypes.types', (v: unknown, p: string): BaseTypeInfo => {
+        types: luaArray(r['types'], 'baseTypes.types', (v: unknown, p: string): BaseTypeInfo => {
             const t: JsonRecord = record(v, p);
             return { baseType: string(t['baseType'], `${p}.baseType`), bases: number(t['bases'], `${p}.bases`) };
         }),

@@ -1,7 +1,6 @@
+import type { Element, FloorSettings } from '@poe-upgrade-finder/vocab';
 // Editing FloorSettings one entry at a time (the Settings form). Pure, so it is unit-tested. An entry that
 // is unset is off; numbers are kept when ticked on again via the defaults given by the form.
-
-import type { Element, FloorSettings } from '@poe-upgrade-finder/ipc';
 
 export type NumberFloor = 'chaosResMin' | 'spellBlockMin';
 export type BoolFloor = 'elementalResCapped' | 'attributesMet' | 'flagLifeLoss' | 'flagNetRegen';

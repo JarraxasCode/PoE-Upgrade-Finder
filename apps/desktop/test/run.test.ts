@@ -51,6 +51,7 @@ function evaluated(over: Partial<{ gain: number; seller: string | undefined; tex
             price: { amount: 5, currency: 'chaos', type: '~b/o' },
             chaosEquivalent: 5,
             bandId: 'b1',
+            role: 'main',
         },
         scored: { stats: { damage: 1, values: {} }, unparsed: ['weird line'] },
         gain: { gain: over.gain ?? 2.5, dpsPct: 3, ehpPct: 2 },

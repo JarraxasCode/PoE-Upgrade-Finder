@@ -7,57 +7,27 @@
 // renderer gets a typed error instead of Electron's rewritten exception text. Events from main go over one
 // event channel as a MainEvent union.
 //
-// Some types mirror packages/core and engine-client (slots, depth, floors). They are repeated here because
-// this package must stay free of Node code (the renderer bundles it); a test in apps/desktop checks they match.
+// The shared words (slots, depth, floors, the slot plan) come from @poe-upgrade-finder/vocab, which is free
+// of Node code like this package (the renderer bundles both).
 
-import type { LimitPanel, RunEventUi, RunHeader, RunPhase, RunRequest, RunSnapshot, WeightPreview } from './run.ts';
-import type { ItemView } from './item-view.ts';
-import type { SlotEditorData, SlotPlan } from './plan.ts';
+import type { LimitPanel, RunEventUi, RunHeader, RunPhase, RunRequest, RunSnapshot, UniqueList, WeightPreview } from './run.ts';
+import type { SlotEditorData } from './plan.ts';
+import type {
+    FloorSettings,
+    GearSlot,
+    ItemView,
+    LevelFilter,
+    ListingType,
+    SearchDepth,
+    SlotPlan,
+    UniqueChoice,
+    WeightEdits,
+} from '@poe-upgrade-finder/vocab';
 
 export const INVOKE_CHANNEL: string = 'uf:invoke';
 export const EVENT_CHANNEL: string = 'uf:event';
 
 // Shared vocabulary ----------------------------------------------------------------------------------------
-
-export type GearSlot = 'Helmet' | 'Body Armour' | 'Gloves' | 'Boots' | 'Amulet' | 'Ring 1' | 'Ring 2' | 'Belt' | 'Weapon 1' | 'Weapon 2';
-export const GEAR_SLOTS: readonly GearSlot[] = [
-    'Helmet',
-    'Body Armour',
-    'Gloves',
-    'Boots',
-    'Amulet',
-    'Ring 1',
-    'Ring 2',
-    'Belt',
-    'Weapon 1',
-    'Weapon 2',
-];
-
-export type SearchDepth = 'thorough' | 'normal' | 'quick';
-export const SEARCH_DEPTHS: readonly SearchDepth[] = ['thorough', 'normal', 'quick'];
-
-/** Instant buyout only, or whisper listings too (D6). */
-export type ListingType = 'securable' | 'online';
-export const LISTING_TYPES: readonly ListingType[] = ['securable', 'online'];
-
-export type Element = 'Fire' | 'Cold' | 'Lightning';
-export const ELEMENTS: readonly Element[] = ['Fire', 'Cold', 'Lightning'];
-
-/** Per build. The same shape as core's FloorSettings: omitted entries are off. */
-export interface FloorSettings {
-    readonly chaosResMin?: number;
-    readonly maxResMin?: Readonly<Partial<Record<Element, number>>>;
-    readonly elementalResCapped?: boolean;
-    readonly spellBlockMin?: number;
-    readonly attributesMet?: boolean;
-    readonly targets?: {
-        readonly chaosRes?: number;
-        readonly maxRes?: Readonly<Partial<Record<Element, number>>>;
-        readonly overcapMin?: number;
-    };
-    readonly flagLifeLoss?: boolean;
-    readonly flagNetRegen?: boolean;
-}
 
 // Settings (PLAN.md, Data, settings & storage) -------------------------------------------------------------
 
@@ -72,12 +42,6 @@ export interface AppSettings {
 }
 
 /** characters/<build>.json. */
-/** The level requirement filter (issue #22; a mirror of core's LevelFilter): up to the character's level, none, or up to a set level. */
-export type LevelFilter = { readonly kind: 'character' } | { readonly kind: 'off' } | { readonly kind: 'max'; readonly level: number };
-export const LEVEL_FILTER_KINDS: readonly LevelFilter['kind'][] = ['character', 'off', 'max'];
-/** Character levels run 1 to 100. */
-export const MAX_CHARACTER_LEVEL: number = 100;
-
 export interface BuildSettings {
     readonly floors: FloorSettings;
     /** DPS share of the gain, 0 to 1. */
@@ -90,12 +54,17 @@ export interface BuildSettings {
     readonly lastMinBudget: string | null;
     /** A target id (TargetOption.id). */
     readonly lastTarget: string | null;
-    /** The weight review per slot: stat id → weight, 0 for off (PLAN.md, "Review PoB's weights before searching"). */
-    readonly weightEdits: Readonly<Partial<Record<GearSlot, Readonly<Record<string, number>>>>>;
+    /**
+     * The weight review per slot: stat id → a factor on PoB's weight and/or off (PLAN.md, "Review PoB's weights
+     * before searching"; vocab's weight-model, #111). Relative, so it holds when PoB's weights are regenerated.
+     */
+    readonly weightEdits: Readonly<Partial<Record<GearSlot, WeightEdits>>>;
     /** The slot plan per slot, as last edited or run (PLAN.md, "v2a"); a slot with none searches as v0.1 did. */
     readonly slotPlans: Readonly<Partial<Record<GearSlot, SlotPlan>>>;
     /** Which items the searches return by level requirement. */
     readonly levelFilter: LevelFilter;
+    /** Per slot: the Rare / Unique switch and the picked unique (#113); a slot with none searches rares. */
+    readonly uniqueChoices: Readonly<Partial<Record<GearSlot, UniqueChoice>>>;
 }
 
 // Builds ---------------------------------------------------------------------------------------------------
@@ -314,6 +283,11 @@ export interface Methods {
     'slot.data': {
         readonly params: { readonly slot: GearSlot; readonly itemType: string; readonly base: string | null };
         readonly result: SlotEditorData;
+    };
+    /** The uniques PoB knows for the slot's item type, scored in the build (#113; cached like the weights). */
+    'uniques.list': {
+        readonly params: { readonly buildId: string; readonly slot: GearSlot; readonly target: string; readonly itemType: string };
+        readonly result: UniqueList;
     };
     /** Starts a run (one at a time). Progress streams as run events. */
     'run.start': { readonly params: { readonly request: RunRequest }; readonly result: RunHeader };

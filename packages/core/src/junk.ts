@@ -7,9 +7,8 @@
 //   dominated   another shown item costs less and gains more (both strictly)
 // Items priced in another currency have no chaos equivalent, so they never dominate or get dominated.
 
+import type { JunkReason } from '@poe-upgrade-finder/vocab';
 import type { EvaluatedItem } from './evaluate.ts';
-
-export type JunkReason = 'floor' | 'no-gain' | 'low-gain' | 'duplicate' | 'dominated';
 
 export const DEFAULT_MIN_GAIN_PCT: number = 1;
 

@@ -12,11 +12,12 @@
 // - Defences are compared at 20% quality: listed × 1.2 / (1 + quality) for an item below 20% (decision 19).
 //   An item above 20% is compared as listed (seen on a live run: 702 Armour at 24% passed a min of 700).
 
-import type { DefenceKind } from '@poe-upgrade-finder/engine-client';
+import { SOCKET_COLOURS } from '@poe-upgrade-finder/vocab';
+import type { DefenceKind, SocketColour, SocketRange, SocketRow } from '@poe-upgrade-finder/vocab';
 import type { StatLine, StatLineKind } from '@poe-upgrade-finder/trade';
 import { PSEUDO_TOTALS } from './pseudo-totals.ts';
 import type { PseudoTotal } from './pseudo-totals.ts';
-import type { SearchDefence, SearchExclusion, SearchRequirement } from './spec.ts';
+import type { SearchDefence, SearchExclusion, SearchRequirement, SearchSockets } from './spec.ts';
 
 /** met: as the site should have it; missed: by this reading it doesn't; unknown: the item's lines aren't known. */
 export type MatchStatus = 'met' | 'missed' | 'unknown';
@@ -64,10 +65,20 @@ export interface DefenceMatch {
     readonly status: MatchStatus;
 }
 
+/** One socket filter row (#58) against the item's sockets. */
+export interface SocketMatch {
+    readonly row: SocketRow;
+    readonly label: string;
+    /** "6 sockets, 5 linked"; null when the listing gave no socket data. */
+    readonly value: string | null;
+    readonly status: MatchStatus;
+}
+
 export interface PlanMatch {
     readonly requirements: readonly RequirementMatch[];
     readonly exclusions: readonly ExclusionMatch[];
     readonly defences: readonly DefenceMatch[];
+    readonly sockets: readonly SocketMatch[];
 }
 
 /** What the matcher reads of the spec. */
@@ -75,6 +86,8 @@ export interface MatchSpec {
     readonly requirements: readonly SearchRequirement[];
     readonly exclusions: readonly SearchExclusion[];
     readonly defences: readonly SearchDefence[];
+    /** Missing: none (callers from before #58). */
+    readonly sockets?: readonly SearchSockets[];
 }
 
 /** What it reads of the item: its lines with their stats, and its property lines ("Armour: 418", "Quality: +12%"). */
@@ -83,9 +96,11 @@ export interface MatchItem {
     readonly statLines: readonly StatLine[] | undefined;
     /** Undefined when the listing had no tooltip data. */
     readonly properties: readonly string[] | undefined;
+    /** The sockets as the tooltip writes them ("R-G-B B"); missing when the listing had no tooltip data. */
+    readonly sockets?: string | undefined;
 }
 
-export const NO_PLAN_MATCH: PlanMatch = { requirements: [], exclusions: [], defences: [] };
+export const NO_PLAN_MATCH: PlanMatch = { requirements: [], exclusions: [], defences: [], sockets: [] };
 
 const EPSILON: number = 1e-9;
 const DOWN: RegExp = /\b(?:reduced|less)\b/i;
@@ -246,6 +261,68 @@ function matchDefence(d: SearchDefence, properties: readonly string[] | undefine
     return { ...base, listed: listed, quality: quality, compared: compared, status: inRange(compared, d.min, d.max) ? 'met' : 'missed' };
 }
 
+/** An item's sockets as the site counts them (V30): every socket (abyssal ones too), the largest linked group. */
+export interface SocketCounts {
+    readonly sockets: number;
+    readonly links: number;
+    /** R, G, B and W over every socket, and in the largest linked group (per colour, its best group of that size). */
+    readonly colours: Readonly<Record<SocketRow, Readonly<Record<SocketColour, number>>>>;
+}
+
+function noColours(): Record<SocketColour, number> {
+    return { r: 0, g: 0, b: 0, w: 0 };
+}
+
+/** From the tooltip's socket text: "-" links two sockets, a space starts a new group ("R-G-A B"). */
+export function socketCounts(text: string): SocketCounts {
+    const groups: string[][] = text
+        .trim()
+        .split(/\s+/)
+        .filter((g: string) => g.length > 0)
+        .map((g: string) => g.split('-').filter((c: string) => c.length > 0));
+    const all: Record<SocketColour, number> = noColours();
+    let sockets: number = 0;
+    let links: number = 0;
+    for (const g of groups) {
+        sockets += g.length;
+        links = Math.max(links, g.length);
+        for (const c of g) {
+            const colour: string = c.toLowerCase();
+            if ((SOCKET_COLOURS as readonly string[]).includes(colour)) {
+                all[colour as SocketColour] += 1;
+            }
+        }
+    }
+    const linked: Record<SocketColour, number> = noColours();
+    for (const g of groups.filter((x: string[]) => x.length === links)) {
+        for (const colour of SOCKET_COLOURS) {
+            linked[colour] = Math.max(linked[colour], g.filter((c: string) => c.toLowerCase() === colour).length);
+        }
+    }
+    return { sockets: sockets, links: links, colours: { sockets: all, links: linked } };
+}
+
+function fitsSockets(counts: SocketCounts, row: SocketRow, range: SocketRange): boolean {
+    const n: number = row === 'sockets' ? counts.sockets : counts.links;
+    const colours: Readonly<Record<SocketColour, number>> = counts.colours[row];
+    return inRange(n, range.min, range.max) && SOCKET_COLOURS.every((c: SocketColour) => colours[c] >= (range[c] ?? 0));
+}
+
+function matchSockets(s: SearchSockets, text: string | undefined): SocketMatch {
+    const base = { row: s.row, label: s.label };
+    if (text === undefined) {
+        return { ...base, value: null, status: 'unknown' };
+    }
+    const counts: SocketCounts = socketCounts(text);
+    // The tooltip writes "" both for an item with no sockets and for a listing that left them out: only a filter
+    // that no sockets meets can say so; otherwise it isn't known.
+    if (counts.sockets === 0 && !fitsSockets(counts, s.row, s.range)) {
+        return { ...base, value: null, status: 'unknown' };
+    }
+    const value: string = `${counts.sockets} socket${counts.sockets === 1 ? '' : 's'}, ${counts.links} linked`;
+    return { ...base, value: value, status: fitsSockets(counts, s.row, s.range) ? 'met' : 'missed' };
+}
+
 /** The item against the spec's requirements, exclusions and defences. */
 export function matchPlan(spec: MatchSpec, item: MatchItem): PlanMatch {
     const lines: readonly StatLine[] | undefined = item.statLines === undefined || item.statLines.length === 0 ? undefined : item.statLines;
@@ -253,5 +330,6 @@ export function matchPlan(spec: MatchSpec, item: MatchItem): PlanMatch {
         requirements: spec.requirements.map((r: SearchRequirement) => matchRequirement(r, lines)),
         exclusions: spec.exclusions.map((e: SearchExclusion) => matchExclusion(e, lines)),
         defences: spec.defences.map((d: SearchDefence) => matchDefence(d, item.properties)),
+        sockets: (spec.sockets ?? []).map((s: SearchSockets) => matchSockets(s, item.sockets)),
     };
 }

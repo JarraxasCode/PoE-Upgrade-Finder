@@ -4,13 +4,14 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BandSearch } from '../src/bands.ts';
-import { checkPlan, isEmptyPlan, localDefences, pruneWeights } from '../src/plan.ts';
-import type { ModPick, PlanCheck, PlanDefences, SlotPlan } from '../src/plan.ts';
+import { analysePlan, checkPlan, isEmptyPlan, localDefences } from '../src/plan.ts';
+import type { PlanCheck } from '../src/plan.ts';
 import { compileQuery, predictComplexity } from '../src/query-compiler.ts';
 import { buildSlotSpec } from '../src/slot-spec.ts';
 import type { SlotSpecResult } from '../src/slot-spec.ts';
 import type { PrunedWeight, SlotSearchSpec, WeightedStat } from '../src/spec.ts';
 import { bootsContext, bootsData, S } from './plan-fixtures.ts';
+import type { ModPick, PlanDefences, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const SEARCH: BandSearch = { bandId: 'band-2', option: 'chaos', price: { min: 1, max: 33.33, option: 'chaos' } };
 
@@ -32,7 +33,7 @@ function specOf(p: SlotPlan): SlotSearchSpec {
 
 function prunedOf(p: SlotPlan, ids: readonly string[]): ReadonlyMap<string, PrunedWeight> {
     const weights: WeightedStat[] = ids.map((id: string) => ({ statId: id, weight: 1 }));
-    const { pruned } = pruneWeights(weights, p, 'Boots', bootsData());
+    const { pruned } = analysePlan(p, 'Boots', bootsData()).prune(weights);
     return new Map(pruned.map((w: PrunedWeight) => [w.statId, w]));
 }
 

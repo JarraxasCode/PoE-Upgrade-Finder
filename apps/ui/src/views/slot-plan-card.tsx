@@ -5,26 +5,12 @@
 
 import { useEffect, useRef, useState } from 'preact/hooks';
 import type { JSX, TargetedEvent } from 'preact';
-import { MAX_PLAN_TOTALS, SLOT_ITEM_TYPES } from '@poe-upgrade-finder/ipc';
-import type {
-    BaseOption,
-    DefenceKind,
-    DefenceRange,
-    GearSlot,
-    ModPick,
-    ModPosition,
-    ModRule,
-    PickStat,
-    SlotEditorData,
-    SlotPlan,
-    StatOption,
-    PlanTotal,
-    TotalOption,
-} from '@poe-upgrade-finder/ipc';
+import type { BaseOption, SlotEditorData, StatOption, TotalOption } from '@poe-upgrade-finder/ipc';
 import {
     DEFENCE_LABELS,
     defenceKindsOf,
     defenceSummaryParts,
+    socketSummaryParts,
     editorItemType,
     kindLabel,
     listOptions,
@@ -35,6 +21,8 @@ import {
     pickOf,
     pickProblem,
     planOptions,
+    emptyRows,
+    planAffixes,
     rowLimit,
     excludeRows,
     rowsOf,
@@ -54,10 +42,25 @@ import {
 } from '../slot-plan-model.ts';
 import type { ListedOption, PlanOption, StatBounds } from '../slot-plan-model.ts';
 import { editorData, editorDataKey, isEmptySlotPlan, loadEditorData, planFor, setSlotPlan } from '../state/plan.ts';
+import { retrySave, selectedBuildId, unsaved } from '../state/builds.ts';
 import { weightPreview } from '../state/weights.ts';
 import { Info } from './item-card.tsx';
+import { SocketFilters } from './socket-filters.tsx';
 import { InfluenceIcon, MARK_OF_INFLUENCE } from './influence-icon.tsx';
 import type { MarkKind } from './influence-icon.tsx';
+import { anyOfType, isGenericType, MAX_TOTALS, slotItemTypes } from '@poe-upgrade-finder/vocab';
+import type {
+    BaseAffixes,
+    DefenceKind,
+    DefenceRange,
+    GearSlot,
+    ModPick,
+    ModPosition,
+    ModRule,
+    PickStat,
+    PlanTotal,
+    SlotPlan,
+} from '@poe-upgrade-finder/vocab';
 
 /** The clear/remove mark: two strokes, drawn so it stays crisp at any size. */
 function ClearIcon(): JSX.Element {
@@ -73,6 +76,8 @@ interface Ctx {
     readonly data: SlotEditorData;
     readonly options: readonly PlanOption[];
     readonly plan: SlotPlan;
+    /** What the plan's base allows on its affixes: the rows and the bounds (issue #37). */
+    readonly affixes: BaseAffixes;
     readonly itemType: string;
     readonly equippedType: string | null;
 }
@@ -266,7 +271,7 @@ function StatRange(props: {
     readonly inline?: boolean;
 }): JSX.Element {
     const { ctx, index, stat, picked } = props;
-    const bounds: StatBounds | undefined = statBounds(ctx.options, stat);
+    const bounds: StatBounds | undefined = statBounds(ctx.options, stat, ctx.affixes);
     const [minText, setMinText] = useState<string>(rollText(picked.min));
     const [maxText, setMaxText] = useState<string>(rollText(picked.max));
     useEffect(() => {
@@ -433,10 +438,11 @@ function EmptyRow(props: { readonly ctx: Ctx; readonly position: ModPosition | n
 function PlanSection(props: { readonly ctx: Ctx; readonly position: ModPosition }): JSX.Element {
     const { ctx, position } = props;
     const indices: readonly number[] = rowsOf(ctx.plan)[position];
-    const limit: number = rowLimit(position);
-    // Affixes always show their 3 rows; implicits show one spare row while there's room.
-    const empties: number = position === 'implicit' ? (indices.length < limit ? 1 : 0) : Math.max(0, limit - indices.length);
+    const limit: number = rowLimit(position, ctx.affixes);
+    // Affixes show up to 3 rows, then a spare one while the base takes more (issue #37); implicits one spare row.
+    const empties: number = emptyRows(position, indices.length, ctx.affixes);
     const includes: number = indices.length;
+    const where: string = ctx.plan.base ?? `any ${ctx.itemType}`;
     return (
         <section class={`plan-section plan-${position}`} aria-label={POSITION_WORDS[position].title}>
             <h3 class="plan-section-head">
@@ -448,6 +454,11 @@ function PlanSection(props: { readonly ctx: Ctx; readonly position: ModPosition 
                     </span>
                 )}
             </h3>
+            {position !== 'implicit' && limit === 0 && (
+                <p class="muted small">
+                    {where} has no {POSITION_WORDS[position].one}es.
+                </p>
+            )}
             <ul class="plan-rows">
                 {indices.map((i: number) => {
                     const pick: ModPick | undefined = ctx.plan.picks[i];
@@ -496,14 +507,16 @@ function ExcludeSection(props: { readonly ctx: Ctx }): JSX.Element {
 }
 
 function TypeAndBase(props: {
-    readonly slot: GearSlot;
     readonly plan: SlotPlan;
+    /** The types the slot can pick (Weapon 2: what fits beside Weapon 1, #39). */
+    readonly offered: readonly string[];
     readonly itemType: string;
     readonly equippedType: string | null;
     readonly bases: readonly BaseOption[] | undefined;
 }): JSX.Element {
-    const { slot, plan, itemType, equippedType, bases } = props;
-    const types: readonly string[] = SLOT_ITEM_TYPES[slot];
+    const { plan, offered, itemType, equippedType, bases } = props;
+    // A saved plan's type that no longer fits (Weapon 1 changed in PoB) still shows, marked, until it's changed.
+    const types: readonly string[] = offered.includes(itemType) ? offered : [itemType, ...offered];
     const sorted: readonly BaseOption[] = [...(bases ?? [])].sort(
         (a: BaseOption, b: BaseOption) => b.level - a.level || a.name.localeCompare(b.name),
     );
@@ -525,35 +538,41 @@ function TypeAndBase(props: {
                     >
                         {types.map((t: string) => (
                             <option key={t} value={t}>
-                                {t === equippedType ? `${t} (equipped)` : t}
+                                {offered.includes(t) ? (t === equippedType ? `${t} (equipped)` : t) : `${t} (doesn't fit beside Weapon 1)`}
                             </option>
                         ))}
                     </select>
-                    <p class="hint">Changing it clears the base, mods and defences.</p>
+                    <p class="hint">
+                        {isGenericType(itemType)
+                            ? 'Every weapon type in the group: totals only, since bases and mods are per item type. PoB’s weights are still for your equipped weapon.'
+                            : 'Changing it clears the base, mods and defences.'}
+                    </p>
                 </div>
             )}
-            <div class="field">
-                <label for="plan-base">Base</label>
-                <select
-                    id="plan-base"
-                    value={plan.base ?? ''}
-                    disabled={bases === undefined}
-                    onChange={(e: TargetedEvent<HTMLSelectElement>) => {
-                        const v: string = e.currentTarget.value;
-                        setSlotPlan(withBase(plan, v === '' ? null : v, itemType, equippedType));
-                    }}
-                >
-                    <option value="">Any {itemType.toLowerCase()} base</option>
-                    {plan.base !== null && !sorted.some((b: BaseOption) => b.name === plan.base) && (
-                        <option value={plan.base}>{plan.base}</option>
-                    )}
-                    {sorted.map((b: BaseOption) => (
-                        <option key={b.name} value={b.name}>
-                            {`${b.name} · level ${b.level}${b.implicits.length > 0 ? ` · ${b.implicits.flatMap((i) => i.lines).join(', ')}` : ''}`}
-                        </option>
-                    ))}
-                </select>
-            </div>
+            {!isGenericType(itemType) && (
+                <div class="field">
+                    <label for="plan-base">Base</label>
+                    <select
+                        id="plan-base"
+                        value={plan.base ?? ''}
+                        disabled={bases === undefined}
+                        onChange={(e: TargetedEvent<HTMLSelectElement>) => {
+                            const v: string = e.currentTarget.value;
+                            setSlotPlan(withBase(plan, v === '' ? null : v, itemType, equippedType));
+                        }}
+                    >
+                        <option value="">Any {itemType.toLowerCase()} base</option>
+                        {plan.base !== null && !sorted.some((b: BaseOption) => b.name === plan.base) && (
+                            <option value={plan.base}>{plan.base}</option>
+                        )}
+                        {sorted.map((b: BaseOption) => (
+                            <option key={b.name} value={b.name}>
+                                {`${b.name} · level ${b.level}${b.implicits.length > 0 ? ` · ${b.implicits.flatMap((i) => i.lines).join(', ')}` : ''}`}
+                            </option>
+                        ))}
+                    </select>
+                </div>
+            )}
         </div>
     );
 }
@@ -839,7 +858,7 @@ function TotalsSection(props: { readonly ctx: Ctx }): JSX.Element {
                     <TotalRow key={t.statId} ctx={ctx} total={t} />
                 ))}
             </div>
-            {totals.length < MAX_PLAN_TOTALS && <TotalPicker ctx={ctx} />}
+            {totals.length < MAX_TOTALS && <TotalPicker ctx={ctx} />}
         </section>
     );
 }
@@ -864,7 +883,7 @@ function PlanProblems(props: { readonly slot: GearSlot }): JSX.Element | null {
     );
 }
 
-/** The plan in short, as chips under the title: base, includes, excludes, totals, then each defence range. */
+/** The plan in short, as chips under the title: base, includes, excludes, totals, each defence range, then the socket filters. */
 function PlanSummary(props: { readonly plan: SlotPlan }): JSX.Element {
     const plan: SlotPlan = props.plan;
     if (isEmptySlotPlan(plan)) {
@@ -879,7 +898,7 @@ function PlanSummary(props: { readonly plan: SlotPlan }): JSX.Element {
     const totals: number = totalsOf(plan).length;
     return (
         <ul class="plan-summary" aria-label="The plan in short">
-            <li class="sum-base">{plan.base ?? (plan.itemType === null ? 'Any base' : `Any ${plan.itemType.toLowerCase()} base`)}</li>
+            <li class="sum-base">{plan.base ?? (plan.itemType === null ? 'Any base' : anyOfType(plan.itemType))}</li>
             {inc > 0 && <li class="sum-include">{`${inc} include${inc === 1 ? '' : 's'}`}</li>}
             {exc > 0 && <li class="sum-exclude">{`${exc} exclude${exc === 1 ? '' : 's'}`}</li>}
             {totals > 0 && <li class="sum-total">{`${totals} total${totals === 1 ? '' : 's'}`}</li>}
@@ -888,18 +907,48 @@ function PlanSummary(props: { readonly plan: SlotPlan }): JSX.Element {
                     {d}
                 </li>
             ))}
+            {socketSummaryParts(plan).map((d: string) => (
+                <li key={d} class="sum-sockets">
+                    {d}
+                </li>
+            ))}
         </ul>
     );
 }
 
-export function SlotPlanCard(props: { readonly slot: GearSlot; readonly equippedType: string | null }): JSX.Element {
-    const { slot, equippedType } = props;
+/** Why the editor can't be used yet, or null. */
+function blockedReason(slot: GearSlot, waiting: string | null, offered: readonly string[]): string | null {
+    if (waiting !== null) {
+        return waiting;
+    }
+    if (offered.length === 0) {
+        return slot === 'Weapon 2' ? 'Weapon 1 is two-handed: nothing goes in Weapon 2.' : `${slot} has no item types to plan.`;
+    }
+    return null;
+}
+
+/**
+ * The editor for one slot's plan. `waiting` says why the build's gear isn't known yet (PoB still loading, or
+ * failed): until it is, the editor neither asks for slot data nor saves a type (#36). Weapon 2 offers only what
+ * fits beside `weapon1Type` (#39).
+ */
+export function SlotPlanCard(props: {
+    readonly slot: GearSlot;
+    readonly equippedType: string | null;
+    readonly weapon1Type: string | null;
+    readonly waiting: string | null;
+}): JSX.Element {
+    const { slot, equippedType, weapon1Type, waiting } = props;
     const plan: SlotPlan = planFor(slot);
-    const itemType: string = editorItemType(slot, plan, equippedType);
+    const offered: readonly string[] = slotItemTypes(slot, weapon1Type);
+    const blocked: string | null = blockedReason(slot, waiting, offered);
+    const itemType: string = editorItemType(slot, plan, equippedType, weapon1Type);
     const key: string = editorDataKey(slot, itemType, plan.base);
     useEffect(() => {
-        void loadEditorData(slot, itemType, plan.base);
-    }, [key]);
+        if (blocked === null) {
+            void loadEditorData(slot, itemType, plan.base);
+        }
+    }, [key, blocked]);
     // Keep the last data for this type on screen while a new base loads, so the rows don't jump.
     const last = useRef<SlotEditorData | null>(null);
     const st = editorData.value;
@@ -911,7 +960,16 @@ export function SlotPlanCard(props: { readonly slot: GearSlot; readonly equipped
     const stale: boolean = data !== null && data.base !== plan.base;
     const options: readonly PlanOption[] = useOptions(data);
     const ctx: Ctx | null =
-        data === null ? null : { data: data, options: options, plan: plan, itemType: itemType, equippedType: equippedType };
+        data === null
+            ? null
+            : {
+                  data: data,
+                  options: options,
+                  plan: plan,
+                  affixes: planAffixes(data, plan.base),
+                  itemType: itemType,
+                  equippedType: equippedType,
+              };
     return (
         <div class="card plan-card">
             <div class="plan-head">
@@ -929,6 +987,14 @@ export function SlotPlanCard(props: { readonly slot: GearSlot; readonly equipped
                     </Info>
                 </h2>
                 <PlanSummary plan={plan} />
+                {unsaved.value !== null && unsaved.value.buildId === selectedBuildId.value && (
+                    <span class="plan-unsaved">
+                        Not saved ·{' '}
+                        <button type="button" class="link small" onClick={retrySave}>
+                            Retry
+                        </button>
+                    </span>
+                )}
                 {!isEmptySlotPlan(plan) && (
                     <span class="plan-actions">
                         {plan.picks.length > 0 && (
@@ -955,17 +1021,33 @@ export function SlotPlanCard(props: { readonly slot: GearSlot; readonly equipped
                     </span>
                 )}
             </div>
-            <TypeAndBase slot={slot} plan={plan} itemType={itemType} equippedType={equippedType} bases={data?.bases} />
-            {st.kind === 'error' && st.key === key && <p class="fail">{st.message}</p>}
-            {ctx === null && st.kind !== 'error' && <p class="muted">PoB is listing the {itemType.toLowerCase()} mods…</p>}
-            {ctx !== null && (
+            {blocked !== null && <p class="muted">{blocked}</p>}
+            {blocked === null && (
+                <TypeAndBase plan={plan} offered={offered} itemType={itemType} equippedType={equippedType} bases={data?.bases} />
+            )}
+            {blocked === null && st.kind === 'error' && st.key === key && <p class="fail">{st.message}</p>}
+            {blocked === null && ctx === null && st.kind !== 'error' && (
+                <p class="muted">PoB is listing the {itemType.toLowerCase()} mods…</p>
+            )}
+            {blocked === null && ctx !== null && (
                 <div class={`plan-item${stale ? ' stale' : ''}`} aria-busy={stale}>
-                    <DefencesSection ctx={ctx} />
-                    <TotalsSection ctx={ctx} />
-                    <PlanSection ctx={ctx} position="implicit" />
-                    <PlanSection ctx={ctx} position="prefix" />
-                    <PlanSection ctx={ctx} position="suffix" />
-                    <ExcludeSection ctx={ctx} />
+                    {isGenericType(itemType) ? (
+                        // A generic weapon type (#39): no slot data, so totals (and socket filters) only.
+                        <>
+                            <TotalsSection ctx={ctx} />
+                            <SocketFilters plan={ctx.plan} />
+                        </>
+                    ) : (
+                        <>
+                            <DefencesSection ctx={ctx} />
+                            <TotalsSection ctx={ctx} />
+                            <SocketFilters plan={ctx.plan} />
+                            <PlanSection ctx={ctx} position="implicit" />
+                            <PlanSection ctx={ctx} position="prefix" />
+                            <PlanSection ctx={ctx} position="suffix" />
+                            <ExcludeSection ctx={ctx} />
+                        </>
+                    )}
                 </div>
             )}
             <PlanProblems slot={slot} />

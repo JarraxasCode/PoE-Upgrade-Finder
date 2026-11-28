@@ -2,15 +2,15 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { SlotData, SlotModType } from '@poe-upgrade-finder/engine-client';
+import type { SlotData } from '@poe-upgrade-finder/engine-client';
 import type { BandSearch } from '../src/bands.ts';
-import { checkPlan, pruneWeights } from '../src/plan.ts';
-import type { ModPick, PlanTotal, SlotPlan } from '../src/plan.ts';
+import { analysePlan, checkPlan } from '../src/plan.ts';
 import { PSEUDO_TOTALS, pseudoSourceStats, pseudoTotalFor } from '../src/pseudo-totals.ts';
 import { compileQuery, requirementFilters } from '../src/query-compiler.ts';
 import { buildSlotSpec } from '../src/slot-spec.ts';
 import type { PrunedWeight, SearchRequirement, SlotSearchSpec, WeightedStat } from '../src/spec.ts';
 import { bootsContext, bootsData } from './plan-fixtures.ts';
+import type { ModPick, PlanTotal, SlotModType, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const R = {
     dex: 'explicit.stat_3261801346',
@@ -80,7 +80,11 @@ function specOf(p: SlotPlan, weights: readonly (readonly [string, number])[] = [
 
 function prunedOf(p: SlotPlan, ids: readonly string[]): ReadonlyMap<string, PrunedWeight['reason']> {
     const weights: WeightedStat[] = ids.map((id: string) => ({ statId: id, weight: 1 }));
-    return new Map(pruneWeights(weights, p, 'Boots', data()).pruned.map((w: PrunedWeight) => [w.statId, w.reason]));
+    return new Map(
+        analysePlan(p, 'Boots', data())
+            .prune(weights)
+            .pruned.map((w: PrunedWeight) => [w.statId, w.reason]),
+    );
 }
 
 test('the table: each stat maps to one pseudo, and every pseudo counts its own stat', () => {

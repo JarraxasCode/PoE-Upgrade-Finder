@@ -17,13 +17,14 @@ import {
     readStats,
     readStrip,
     readTradeQuery,
+    readUniques,
     readTradeQueryProgress,
 } from './protocol.ts';
+import type { GearSlot } from '@poe-upgrade-finder/vocab';
 import type {
     CommandName,
     EngineWarning,
     FinalMessage,
-    GearSlot,
     LoadBuildData,
     PingData,
     ReadyEvent,
@@ -32,7 +33,9 @@ import type {
     StreamEvent,
     StripData,
     TargetRequest,
+    GeneratorOptions,
     TradeQueryData,
+    UniquesData,
     TradeQueryProgress,
 } from './protocol.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
@@ -58,7 +61,15 @@ export interface TradeQueryOptions {
     readonly target?: TargetRequest;
     readonly dpsWeight?: number;
     readonly ehpWeight?: number;
+    /** PoB's generator options; none set means the engine's defaults. */
+    readonly generator?: GeneratorOptions;
     readonly onProgress?: (progress: TradeQueryProgress) => void;
+}
+
+export interface UniquesOptions {
+    readonly target?: TargetRequest;
+    readonly dpsWeight?: number;
+    readonly ehpWeight?: number;
 }
 
 export interface ScoreOptions extends CalcOptions {
@@ -87,6 +98,7 @@ const DEFAULT_IDLE_MS: Readonly<Record<CommandName, number>> = {
     score: 30_000,
     baseTypes: 30_000,
     slotData: 60_000,
+    uniques: 60_000,
     shutdown: 10_000,
 };
 
@@ -175,6 +187,9 @@ export class EngineClient {
             if (options.ehpWeight !== undefined) {
                 args['ehpWeight'] = options.ehpWeight;
             }
+            if (options.generator !== undefined) {
+                args['options'] = options.generator;
+            }
             const final: FinalMessage = await this.sendForBuild('tradeQuery', args, (event: StreamEvent) => {
                 if (event.event === 'progress') {
                     const progress: TradeQueryProgress = readTradeQueryProgress(event.data);
@@ -182,6 +197,23 @@ export class EngineClient {
                 }
             });
             return this.decode(final, readTradeQuery);
+        });
+    }
+
+    /** Every unique PoB knows for an item type, scored in the slot and weighted by its own rolls (#113). */
+    public uniques(slot: GearSlot, itemType: string, options: UniquesOptions = {}): Promise<WithWarnings<UniquesData>> {
+        return this.serial(async () => {
+            const args: Record<string, unknown> = { slot: slot, itemType: itemType };
+            if (options.target) {
+                args['target'] = options.target;
+            }
+            if (options.dpsWeight !== undefined) {
+                args['dpsWeight'] = options.dpsWeight;
+            }
+            if (options.ehpWeight !== undefined) {
+                args['ehpWeight'] = options.ehpWeight;
+            }
+            return this.decode(await this.sendForBuild('uniques', args), readUniques);
         });
     }
 
@@ -334,9 +366,18 @@ export class EngineClient {
         this.worker = worker;
         if (this.build) {
             const build: LoadedBuild = this.build;
-            const reloaded: WithWarnings<LoadBuildData> = await this.sendLoad(build.xml, build.name);
-            build.data = reloaded;
-            this.logger.log('info', 'build reloaded into the new worker', { buildId: reloaded.buildId });
+            try {
+                const reloaded: WithWarnings<LoadBuildData> = await this.sendLoad(build.xml, build.name);
+                build.data = reloaded;
+                this.logger.log('info', 'build reloaded into the new worker', { buildId: reloaded.buildId });
+            } catch (error: unknown) {
+                // The new worker doesn't hold the build: drop it, so the next call starts another and reloads
+                // again, rather than sending the old build id to a live worker that never had it (issue #42).
+                this.logger.log('warn', 'reloading the build into the new worker failed', { error: messageOf(error) });
+                worker.kill('the build reload failed');
+                this.worker = undefined;
+                throw error;
+            }
         }
         return worker;
     }

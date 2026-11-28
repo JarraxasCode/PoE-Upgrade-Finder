@@ -6,7 +6,10 @@
 //  - allowed per window = max(1, floor(0.7 × limit));
 //  - a local timestamped count of every request sent (errors and timeouts included), and the higher of the
 //    local and server counts is used;
-//  - wait rather than retry into a lockout; a wait of maxWaitMs (5 minutes) or more stops the run instead.
+//  - wait rather than retry into a lockout; a wait of maxWaitMs (5 minutes) or more stops the run instead;
+//  - a policy that must be paced but has no usable rules (none seen yet, a 200 without them, or a rule whose
+//    limits can't be read) goes at most one request per fallbackIntervalMs, never unpaced (issue #79). A rule
+//    that can't be read keeps its last good windows.
 //
 // Pure: the clock and sleep are injected, so it is tested with a fake clock.
 
@@ -15,7 +18,7 @@ export type ResponseHeaders = Readonly<Record<string, string>>;
 
 /** The trade site's policies the app uses. Each has its own limits. */
 /** 'data' is the site's static lists (the stat list for ModCatalog): its own rules, from its headers like the rest. */
-export type TradePolicy = 'search' | 'fetch' | 'exchange' | 'data';
+export type TradePolicy = 'search' | 'fetch' | 'data';
 
 export interface RateWindow {
     readonly limit: number;
@@ -33,6 +36,8 @@ export interface ParsedRateHeaders {
     readonly policy: string | undefined;
     /** Rule name (lower-cased, e.g. "account", "ip") → its windows. */
     readonly rules: Readonly<Record<string, readonly RateWindow[]>>;
+    /** Rules named in X-Rate-Limit-Rules whose limit header is missing or has a part that isn't limit:period:restrict. */
+    readonly malformed: readonly string[];
 }
 
 export class RateLimitStop extends Error {
@@ -59,19 +64,19 @@ export function headerValue(headers: ResponseHeaders, name: string): string | un
     return headers[name.toLowerCase()];
 }
 
-function parseTriples(value: string | undefined): number[][] {
-    if (value === undefined || value === '') {
-        return [];
+/** The well-formed a:b:c parts, and whether any part (or the whole value) was missing or malformed. */
+function parseTriples(value: string | undefined): { readonly triples: number[][]; readonly bad: boolean } {
+    if (value === undefined || value.trim() === '') {
+        return { triples: [], bad: true };
     }
-    return value
-        .split(',')
-        .map((part: string) =>
-            part
-                .trim()
-                .split(':')
-                .map((n: string) => Number(n)),
-        )
-        .filter((triple: number[]) => triple.length === 3 && triple.every((n: number) => Number.isFinite(n)));
+    const parts: number[][] = value.split(',').map((part: string) =>
+        part
+            .trim()
+            .split(':')
+            .map((n: string) => (n.trim() === '' ? Number.NaN : Number(n))),
+    );
+    const triples: number[][] = parts.filter((triple: number[]) => triple.length === 3 && triple.every((n: number) => Number.isFinite(n)));
+    return { triples: triples, bad: triples.length !== parts.length };
 }
 
 /** Parses X-Rate-Limit-Rules and each X-Rate-Limit-<rule>[-State] header. Undefined when there are no rules. */
@@ -81,20 +86,28 @@ export function parseRateHeaders(headers: ResponseHeaders): ParsedRateHeaders | 
         return undefined;
     }
     const rules: Record<string, readonly RateWindow[]> = {};
+    const malformed: string[] = [];
     const ruleNames: string[] = rulesValue
         .split(',')
         .map((name: string) => name.trim().toLowerCase())
         .filter((name: string) => name.length > 0);
     for (const ruleName of ruleNames) {
-        const limits: number[][] = parseTriples(headerValue(headers, `x-rate-limit-${ruleName}`));
-        const states: number[][] = parseTriples(headerValue(headers, `x-rate-limit-${ruleName}-state`));
+        const parsedLimits: { readonly triples: number[][]; readonly bad: boolean } = parseTriples(
+            headerValue(headers, `x-rate-limit-${ruleName}`),
+        );
+        // A window of 0 requests or 0 seconds can't pace anything: as malformed as a garbled one.
+        const limits: number[][] = parsedLimits.triples.filter((t: number[]) => (t[0] ?? 0) > 0 && (t[1] ?? 0) > 0);
+        if (parsedLimits.bad || limits.length !== parsedLimits.triples.length) {
+            malformed.push(ruleName);
+        }
+        const states: number[][] = parseTriples(headerValue(headers, `x-rate-limit-${ruleName}-state`)).triples;
         rules[ruleName] = limits.map((triple: number[], index: number): RateWindow => {
             const [limit = 0, period = 0, restrict = 0] = triple;
             const state: number[] | undefined = states.find((s: number[]) => s[1] === period) ?? states[index];
             return { limit: limit, period: period, restrict: restrict, hits: state?.[0], active: state?.[2] ?? 0 };
         });
     }
-    return { policy: headerValue(headers, 'x-rate-limit-policy'), rules: rules };
+    return { policy: headerValue(headers, 'x-rate-limit-policy'), rules: rules, malformed: malformed };
 }
 
 export type LimiterEvent<K extends string> =
@@ -102,6 +115,8 @@ export type LimiterEvent<K extends string> =
     | { readonly kind: 'wait'; readonly key: K; readonly label: string; readonly waitMs: number; readonly reason: string }
     | { readonly kind: 'stop'; readonly key: K; readonly label: string; readonly waitMs: number; readonly reason: string }
     | { readonly kind: 'retry-after'; readonly key: K; readonly seconds: number }
+    /** A response had no rate-limit rules we can use, or a rule we can't read (issue #79). */
+    | { readonly kind: 'unusable'; readonly key: K; readonly reason: string }
     /** A response's headers were read: the counts changed (the UI's rate-limit gauge redraws). */
     | { readonly kind: 'observed'; readonly key: K };
 
@@ -117,6 +132,10 @@ export interface RateLimiterOptions<K extends string> {
     /** A wait this long or longer stops instead. Default 5 minutes. */
     readonly maxWaitMs?: number;
     readonly onEvent?: (event: LimiterEvent<K>) => void;
+    /** Policies that must never go unpaced: with no usable rules they get one request per fallbackIntervalMs. */
+    readonly pacedWithoutRules?: readonly K[];
+    /** Default 10 s. */
+    readonly fallbackIntervalMs?: number;
 }
 
 export interface WaitDecision {
@@ -144,9 +163,12 @@ export interface PolicySnapshot {
 interface PolicyState {
     readonly parsed: ParsedRateHeaders;
     readonly observedAt: number;
+    /** False when a named rule has no windows to pace by. */
+    readonly usable: boolean;
 }
 
 const DEFAULT_RETRY_AFTER_SECONDS: number = 60;
+const DEFAULT_FALLBACK_INTERVAL_MS: number = 10_000;
 /** How long sent times are kept when no policy has been seen yet (the longest window seen on 21 Nov). */
 const DEFAULT_KEEP_SECONDS: number = 3 * 3600;
 
@@ -182,6 +204,8 @@ export class RateLimiter<K extends string = TradePolicy> {
     private readonly headroom: number;
     private readonly maxWaitMs: number;
     private readonly onEvent: (event: LimiterEvent<K>) => void;
+    private readonly pacedWithoutRules: ReadonlySet<K>;
+    private readonly fallbackIntervalMs: number;
     private readonly policies: Map<K, PolicyState> = new Map<K, PolicyState>();
     private readonly sent: Map<K, number[]> = new Map<K, number[]>();
     private readonly blockedUntil: Map<K, number> = new Map<K, number>();
@@ -192,6 +216,8 @@ export class RateLimiter<K extends string = TradePolicy> {
         this.headroom = options.headroom ?? 0.7;
         this.maxWaitMs = options.maxWaitMs ?? 300_000;
         this.onEvent = options.onEvent ?? ((): void => undefined);
+        this.pacedWithoutRules = new Set<K>(options.pacedWithoutRules ?? []);
+        this.fallbackIntervalMs = options.fallbackIntervalMs ?? DEFAULT_FALLBACK_INTERVAL_MS;
     }
 
     public allowedFor(limit: number): number {
@@ -215,8 +241,11 @@ export class RateLimiter<K extends string = TradePolicy> {
         const now: number = this.clock.now();
         const parsed: ParsedRateHeaders | undefined = parseRateHeaders(headers);
         if (parsed !== undefined) {
-            this.policies.set(key, { parsed: parsed, observedAt: now });
+            this.policies.set(key, this.withLastGood(key, parsed, now));
             this.onEvent({ kind: 'observed', key: key });
+        } else if (status === 200 && this.pacedWithoutRules.has(key)) {
+            // The limits we knew still hold; with none known, computeWait paces by the fallback interval.
+            this.onEvent({ kind: 'unusable', key: key, reason: 'a 200 with no X-Rate-Limit-Rules header' });
         }
         if (status === 429) {
             const retryAfter: number = Number(headerValue(headers, 'retry-after'));
@@ -237,11 +266,20 @@ export class RateLimiter<K extends string = TradePolicy> {
             reason = 'Retry-After from a 429';
         }
         const state: PolicyState | undefined = this.policies.get(key);
+        const times: readonly number[] = this.sent.get(key) ?? [];
+        if ((state === undefined || !state.usable) && this.pacedWithoutRules.has(key)) {
+            // No usable rules: the first request goes alone and teaches us the limits; until then, one per interval.
+            const last: number | undefined = times[times.length - 1];
+            const intervalWait: number = last === undefined ? 0 : last + this.fallbackIntervalMs - now;
+            if (intervalWait > waitMs) {
+                waitMs = intervalWait;
+                reason = `no usable rate-limit rules yet: one request per ${this.fallbackIntervalMs / 1000}s`;
+            }
+        }
         if (state === undefined) {
             // Unknown policy: its first request goes alone (requests are serialised anyway) and teaches us the limits.
             return { waitMs: waitMs, reason: reason };
         }
-        const times: readonly number[] = this.sent.get(key) ?? [];
         for (const [ruleName, windows] of Object.entries(state.parsed.rules)) {
             for (const w of windows) {
                 const periodMs: number = w.period * 1000;
@@ -314,6 +352,32 @@ export class RateLimiter<K extends string = TradePolicy> {
             out.set(key, { policy: state.parsed.policy, windows: windows });
         }
         return out;
+    }
+
+    /** A rule we can't read keeps its last good windows (without their stale counts), and says so. */
+    private withLastGood(key: K, parsed: ParsedRateHeaders, now: number): PolicyState {
+        const anyWindows = (rules: Readonly<Record<string, readonly RateWindow[]>>): boolean =>
+            Object.values(rules).some((w: readonly RateWindow[]) => w.length > 0);
+        if (parsed.malformed.length === 0) {
+            return { parsed: parsed, observedAt: now, usable: anyWindows(parsed.rules) };
+        }
+        const previous: PolicyState | undefined = this.policies.get(key);
+        const rules: Record<string, readonly RateWindow[]> = { ...parsed.rules };
+        let usable: boolean = true;
+        for (const name of parsed.malformed) {
+            const last: readonly RateWindow[] = previous?.parsed.rules[name] ?? [];
+            if (last.length > 0) {
+                rules[name] = last.map((w: RateWindow) => ({ ...w, hits: undefined, active: 0 }));
+            } else {
+                usable = false;
+            }
+            this.onEvent({
+                kind: 'unusable',
+                key: key,
+                reason: `the ${name} rule's limits can't be read${last.length === 0 ? '' : '; keeping its last good windows'}`,
+            });
+        }
+        return { parsed: { ...parsed, rules: rules }, observedAt: now, usable: usable && anyWindows(rules) };
     }
 
     private markSent(key: K, label: string): void {

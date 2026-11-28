@@ -1,10 +1,10 @@
 // The engine's JSON checks live in packages/validate (shared with the trade client). ProtocolError is the
-// name the engine client has always used for them.
+// name the engine client has always used for them. Arrays are read with luaArray: Lua writes an empty table as {}.
 
 export {
-    array,
     boolean,
     isRecord,
+    luaArray,
     number,
     oneOf,
     optional,

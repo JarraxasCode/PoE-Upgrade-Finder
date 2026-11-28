@@ -7,6 +7,7 @@ import { onMainEvent } from './api.ts';
 import { App } from './app.tsx';
 import { loadAppInfo, setPobUpdate } from './state/app-info.ts';
 import { buildState, loadBuilds, selectedBuildId, setBuildsList } from './state/builds.ts';
+import { notify } from './state/notices.ts';
 import { loadSettings } from './state/settings.ts';
 import { applyRunEvent, limits, loadRun } from './state/run.ts';
 import { loadTradeState, rate, signIn } from './state/trade.ts';
@@ -48,7 +49,7 @@ onMainEvent((event: MainEvent) => {
             applyRunEvent(event);
             break;
         case 'notice':
-            console.info(`[${event.level}] ${event.message}`);
+            notify(event.level, event.message);
             break;
         default: {
             // Every event kind must be routed: a new one fails to compile here.

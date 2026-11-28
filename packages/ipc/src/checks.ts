@@ -2,25 +2,14 @@
 // content, so main never trusts its input); the renderer checks the response envelope, each method's result,
 // and the events.
 
-import { array, boolean, isRecord, number, oneOf, record, string, ValidationError } from '@poe-upgrade-finder/validate';
+import { array, boolean, isRecord, messageOf, number, oneOf, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
 import { parseBudgetText } from './budget.ts';
 import { readOptionalItemView } from './item-view.ts';
-import { readSlotEditorData, readSlotPlan, readSlotPlans } from './plan.ts';
-import type { SlotPlan } from './plan.ts';
-import { readLimitPanel, readRunEvent, readRunHeader, readRunSnapshot, readWeightPreview, RUN_PHASES } from './run.ts';
+import { readPickedUnique, readSlotEditorData, readSlotPlan, readSlotPlans } from './plan.ts';
+import { readLimitPanel, readRunEvent, readRunHeader, readRunSnapshot, readUniqueList, readWeightPreview, RUN_PHASES } from './run.ts';
 import type { RunPhase, RunRequest } from './run.ts';
-import {
-    ELEMENTS,
-    GEAR_SLOTS,
-    LEVEL_FILTER_KINDS,
-    LISTING_TYPES,
-    MAX_CHARACTER_LEVEL,
-    POB_UPDATE_PHASES,
-    SEARCH_DEPTHS,
-    SIGN_IN_STATUSES,
-    UI_LOG_LEVELS,
-} from './contract.ts';
+import { POB_UPDATE_PHASES, SIGN_IN_STATUSES, UI_LOG_LEVELS } from './contract.ts';
 import type {
     AppInfo,
     AppSettings,
@@ -30,14 +19,10 @@ import type {
     BuildState,
     BuildsList,
     BuildSummary,
-    Element,
     EquippedInfo,
-    FloorSettings,
-    GearSlot,
     InvokeRequest,
     InvokeResponse,
     IpcErrorCode,
-    LevelFilter,
     LogsView,
     MainEvent,
     MethodName,
@@ -52,6 +37,26 @@ import type {
     TargetOption,
     UiLogLine,
 } from './contract.ts';
+import {
+    ELEMENTS,
+    GEAR_SLOTS,
+    LEVEL_FILTER_KINDS,
+    LISTING_TYPES,
+    MAX_CHARACTER_LEVEL,
+    MAX_WEIGHT_FACTOR,
+    SEARCH_DEPTHS,
+    UNIQUE_MODES,
+} from '@poe-upgrade-finder/vocab';
+import type {
+    Element,
+    FloorSettings,
+    GearSlot,
+    LevelFilter,
+    SlotPlan,
+    UniqueChoice,
+    WeightEdit,
+    WeightEdits,
+} from '@poe-upgrade-finder/vocab';
 
 type Read<T> = (value: unknown, path: string) => T;
 
@@ -210,33 +215,127 @@ export function readAppSettings(value: unknown, path: string): AppSettings {
     };
 }
 
+/** One reader per build setting; a missing field the app added later reads as its old meaning. */
+const BUILD_SETTING_READERS: { readonly [K in keyof BuildSettings]-?: Read<BuildSettings[K]> } = {
+    floors: readFloors,
+    blend: between(0, 1),
+    minGainPct: between(0, 100),
+    lastSlot: nullable(slot),
+    lastBudget: nullable(text(32)),
+    // Settings saved before the min price existed have no field: none.
+    lastMinBudget: (value: unknown, path: string) => (value === undefined ? null : nullable(text(32))(value, path)),
+    lastTarget: nullable(targetId),
+    weightEdits: (value: unknown, path: string) => (value === undefined ? {} : readWeightEdits(value, path)),
+    // Settings saved before slot plans existed have none.
+    slotPlans: (value: unknown, path: string) => (value === undefined ? {} : readSlotPlans(value, path)),
+    // Settings saved before the filter was a setting: up to the character's level, as it always was.
+    levelFilter: (value: unknown, path: string) => (value === undefined ? { kind: 'character' } : readLevelFilter(value, path)),
+    // Settings saved before unique searches (#113) have none: every slot searches rares.
+    uniqueChoices: (value: unknown, path: string) => (value === undefined ? {} : readUniqueChoices(value, path)),
+};
+
+function readUniqueChoice(value: unknown, path: string): UniqueChoice {
+    const r: JsonRecord = exact(value, path, ['mode', 'unique']);
+    return { mode: oneOf(r['mode'], `${path}.mode`, UNIQUE_MODES), unique: nullable(readPickedUnique)(r['unique'], `${path}.unique`) };
+}
+
+function readUniqueChoices(value: unknown, path: string): Partial<Record<GearSlot, UniqueChoice>> {
+    const r: JsonRecord = record(value, path);
+    const out: Partial<Record<GearSlot, UniqueChoice>> = {};
+    for (const [key, choice] of Object.entries(r)) {
+        out[slot(key, `${path} key`)] = readUniqueChoice(choice, `${path}.${key}`);
+    }
+    return out;
+}
+
+const BUILD_SETTING_KEYS: readonly (keyof BuildSettings)[] = [
+    'floors',
+    'blend',
+    'minGainPct',
+    'lastSlot',
+    'lastBudget',
+    'lastMinBudget',
+    'lastTarget',
+    'weightEdits',
+    'slotPlans',
+    'levelFilter',
+    'uniqueChoices',
+];
+
+/** Build settings over IPC: all or nothing. */
 export function readBuildSettings(value: unknown, path: string): BuildSettings {
-    const r: JsonRecord = exact(value, path, [
-        'floors',
-        'blend',
-        'minGainPct',
-        'lastSlot',
-        'lastBudget',
-        'lastMinBudget',
-        'lastTarget',
-        'weightEdits',
-        'slotPlans',
-        'levelFilter',
-    ]);
+    const r: JsonRecord = exact(value, path, BUILD_SETTING_KEYS);
+    const field = <T>(read: Read<T>, key: keyof BuildSettings): T => read(r[key], `${path}.${key}`);
     return {
-        floors: readFloors(r['floors'], `${path}.floors`),
-        blend: between(0, 1)(r['blend'], `${path}.blend`),
-        minGainPct: between(0, 100)(r['minGainPct'], `${path}.minGainPct`),
-        lastSlot: nullable(slot)(r['lastSlot'], `${path}.lastSlot`),
-        lastBudget: nullable(text(32))(r['lastBudget'], `${path}.lastBudget`),
-        // Settings saved before the min price existed have no field: none.
-        lastMinBudget: r['lastMinBudget'] === undefined ? null : nullable(text(32))(r['lastMinBudget'], `${path}.lastMinBudget`),
-        lastTarget: nullable(targetId)(r['lastTarget'], `${path}.lastTarget`),
-        weightEdits: r['weightEdits'] === undefined ? {} : readWeightEdits(r['weightEdits'], `${path}.weightEdits`),
-        // Settings saved before slot plans existed have none.
-        slotPlans: r['slotPlans'] === undefined ? {} : readSlotPlans(r['slotPlans'], `${path}.slotPlans`),
-        // Settings saved before the filter was a setting: up to the character's level, as it always was.
-        levelFilter: r['levelFilter'] === undefined ? { kind: 'character' } : readLevelFilter(r['levelFilter'], `${path}.levelFilter`),
+        floors: field(BUILD_SETTING_READERS.floors, 'floors'),
+        blend: field(BUILD_SETTING_READERS.blend, 'blend'),
+        minGainPct: field(BUILD_SETTING_READERS.minGainPct, 'minGainPct'),
+        lastSlot: field(BUILD_SETTING_READERS.lastSlot, 'lastSlot'),
+        lastBudget: field(BUILD_SETTING_READERS.lastBudget, 'lastBudget'),
+        lastMinBudget: field(BUILD_SETTING_READERS.lastMinBudget, 'lastMinBudget'),
+        lastTarget: field(BUILD_SETTING_READERS.lastTarget, 'lastTarget'),
+        weightEdits: field(BUILD_SETTING_READERS.weightEdits, 'weightEdits'),
+        slotPlans: field(BUILD_SETTING_READERS.slotPlans, 'slotPlans'),
+        levelFilter: field(BUILD_SETTING_READERS.levelFilter, 'levelFilter'),
+        uniqueChoices: field(BUILD_SETTING_READERS.uniqueChoices, 'uniqueChoices'),
+    };
+}
+
+/**
+ * Build settings from the file on disk (issue #69): field by field, so one bad field falls back to its default
+ * alone, and one bad slot plan or one slot's bad weight edits drop only that slot. An unknown field (from a newer
+ * version) is dropped. Each drop is reported through `dropped`; the result is always valid. Throws only when the
+ * value isn't a record at all.
+ */
+export function readStoredBuildSettings(
+    value: unknown,
+    path: string,
+    defaults: BuildSettings,
+    dropped: (problem: string) => void,
+): BuildSettings {
+    const r: JsonRecord = record(value, path);
+    for (const key of Object.keys(r)) {
+        if (!(BUILD_SETTING_KEYS as readonly string[]).includes(key)) {
+            dropped(`${path}.${key}: not a setting this version knows`);
+        }
+    }
+    const field = <K extends keyof BuildSettings>(read: Read<BuildSettings[K]>, key: K): BuildSettings[K] => {
+        try {
+            return read(r[key], `${path}.${key}`);
+        } catch (error: unknown) {
+            dropped(messageOf(error));
+            return defaults[key];
+        }
+    };
+    /** Per slot: each entry of the slot record is read on its own, with the field's all-or-nothing reader. */
+    const perSlot = <K extends 'weightEdits' | 'slotPlans' | 'uniqueChoices'>(read: Read<BuildSettings[K]>, key: K): BuildSettings[K] => {
+        const v: unknown = r[key];
+        if (!isRecord(v)) {
+            return field(read, key);
+        }
+        let out: BuildSettings[K] = read({}, `${path}.${key}`);
+        for (const [slotKey, entry] of Object.entries(v)) {
+            try {
+                out = { ...out, ...read({ [slotKey]: entry }, `${path}.${key}`) };
+            } catch (error: unknown) {
+                dropped(messageOf(error));
+            }
+        }
+        return out;
+    };
+    return {
+        floors: field(BUILD_SETTING_READERS.floors, 'floors'),
+        blend: field(BUILD_SETTING_READERS.blend, 'blend'),
+        minGainPct: field(BUILD_SETTING_READERS.minGainPct, 'minGainPct'),
+        lastSlot: field(BUILD_SETTING_READERS.lastSlot, 'lastSlot'),
+        lastBudget: field(BUILD_SETTING_READERS.lastBudget, 'lastBudget'),
+        lastMinBudget: field(BUILD_SETTING_READERS.lastMinBudget, 'lastMinBudget'),
+        lastTarget: field(BUILD_SETTING_READERS.lastTarget, 'lastTarget'),
+        // Files from before #111 hold absolute weights: the reader migrates what it can and reports the rest.
+        weightEdits: perSlot((v: unknown, p: string) => (v === undefined ? {} : readStoredWeightEdits(v, p, dropped)), 'weightEdits'),
+        slotPlans: perSlot(BUILD_SETTING_READERS.slotPlans, 'slotPlans'),
+        levelFilter: field(BUILD_SETTING_READERS.levelFilter, 'levelFilter'),
+        uniqueChoices: perSlot(BUILD_SETTING_READERS.uniqueChoices, 'uniqueChoices'),
     };
 }
 
@@ -260,20 +359,74 @@ export function readLevelFilter(value: unknown, path: string): LevelFilter {
 }
 
 /** Per slot, stat id → weight (0 = off); weights are finite and not negative. */
-function readWeightEdits(value: unknown, path: string): Partial<Record<GearSlot, Readonly<Record<string, number>>>> {
+type SlotWeightEdits = Partial<Record<GearSlot, WeightEdits>>;
+
+/** One stat's edit (vocab's weight-model): a positive factor, off, or both; never neither. */
+function readWeightEdit(value: unknown, path: string): WeightEdit {
+    const r: JsonRecord = exact(value, path, ['factor', 'off']);
+    const factor: number | undefined = r['factor'] === undefined ? undefined : between(0, MAX_WEIGHT_FACTOR)(r['factor'], `${path}.factor`);
+    if (factor === 0) {
+        throw new ValidationError(`${path}.factor: must be above 0 (off is its own field)`);
+    }
+    if (r['off'] !== undefined && r['off'] !== true) {
+        throw new ValidationError(`${path}.off: expected true or no field`);
+    }
+    const off: boolean = r['off'] === true;
+    if (factor === undefined && !off) {
+        throw new ValidationError(`${path}: an edit needs a factor or off`);
+    }
+    return { ...(factor === undefined ? {} : { factor: factor }), ...(off ? { off: true as const } : {}) };
+}
+
+function statKey(statId: string, path: string): string {
+    if (statId.length > 80) {
+        throw new ValidationError(`${path}: a stat id is too long`);
+    }
+    return statId;
+}
+
+/** The edits per slot over IPC: the current shape only. */
+function readWeightEdits(value: unknown, path: string): SlotWeightEdits {
     const r: JsonRecord = record(value, path);
-    const out: Partial<Record<GearSlot, Readonly<Record<string, number>>>> = {};
+    const out: SlotWeightEdits = {};
     for (const [key, edits] of Object.entries(r)) {
         const s: GearSlot = slot(key, `${path} key`);
         const e: JsonRecord = record(edits, `${path}.${key}`);
-        const map: Record<string, number> = {};
+        const map: Record<string, WeightEdit> = {};
         for (const [statId, w] of Object.entries(e)) {
-            if (statId.length > 80) {
-                throw new ValidationError(`${path}.${key}: a stat id is too long`);
-            }
-            map[statId] = between(0, 1e6)(w, `${path}.${key}.${statId}`);
+            map[statKey(statId, `${path}.${key}`)] = readWeightEdit(w, `${path}.${key}.${statId}`);
         }
         out[s] = map;
+    }
+    return out;
+}
+
+/**
+ * The edits per slot from a settings file, old ones included (#111). Before #111 an edit was PoB's absolute
+ * weight with 0 for off: a 0 becomes { off }, and any other number is dropped with a note, since PoB's weight
+ * under the target it was made with isn't recorded (Jarraxas, 27 Nov). A slot left with no edits is left out.
+ */
+function readStoredWeightEdits(value: unknown, path: string, dropped: (problem: string) => void): SlotWeightEdits {
+    const r: JsonRecord = record(value, path);
+    const out: SlotWeightEdits = {};
+    for (const [key, edits] of Object.entries(r)) {
+        const s: GearSlot = slot(key, `${path} key`);
+        const e: JsonRecord = record(edits, `${path}.${key}`);
+        const map: Record<string, WeightEdit> = {};
+        for (const [statId, w] of Object.entries(e)) {
+            const at: string = `${path}.${key}.${statId}`;
+            const id: string = statKey(statId, `${path}.${key}`);
+            if (typeof w !== 'number') {
+                map[id] = readWeightEdit(w, at);
+            } else if (w === 0) {
+                map[id] = { off: true };
+            } else {
+                dropped(`${at}: an old absolute weight edit (${w}), dropped; set it again in the weight review`);
+            }
+        }
+        if (Object.keys(map).length > 0) {
+            out[s] = map;
+        }
     }
     return out;
 }
@@ -348,6 +501,15 @@ export const METHOD_PARAMS: { readonly [M in MethodName]: ParamCheck<M> } = {
             throw new ValidationError(`${path}.plan: the plan is for ${plan.slot}, not ${s}`);
         }
         return { buildId: buildId(r['buildId'], `${path}.buildId`), slot: s, target: targetId(r['target'], `${path}.target`), plan: plan };
+    },
+    'uniques.list': (value: unknown, path: string) => {
+        const r: JsonRecord = exact(value, path, ['buildId', 'slot', 'target', 'itemType']);
+        return {
+            buildId: buildId(r['buildId'], `${path}.buildId`),
+            slot: slot(r['slot'], `${path}.slot`),
+            target: targetId(r['target'], `${path}.target`),
+            itemType: nonEmpty(60)(r['itemType'], `${path}.itemType`),
+        };
     },
     'slot.data': (value: unknown, path: string) => {
         const r: JsonRecord = exact(value, path, ['slot', 'itemType', 'base']);
@@ -592,6 +754,7 @@ export const METHOD_RESULTS: { readonly [M in MethodName]: ResultCheck<M> } = {
     'build.settings.get': readBuildSettings,
     'build.settings.save': readBuildSettings,
     'weights.preview': readWeightPreview,
+    'uniques.list': readUniqueList,
     'slot.data': readSlotEditorData,
     'signin.status': readSignInState,
     'signin.check': readSignInState,

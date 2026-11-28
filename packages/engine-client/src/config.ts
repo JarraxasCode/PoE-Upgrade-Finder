@@ -8,6 +8,12 @@ import type { EngineCommand } from './process.ts';
 /** The environment variable naming the PoB copy (repo layout: runtime\ and src\), e.g. a PoB Community checkout or a copy built by tools/pob-update. */
 export const POB_DIR_ENV: string = 'POE_UF_POB_DIR';
 
+/**
+ * Set to 1 to make a missing PoB copy (or luahost.exe) fail the golden tests instead of skipping them
+ * (test/golden/engine.ts). `npm run check` sets it (tools/check/check.ts); a plain `npm test` doesn't.
+ */
+export const REQUIRE_POB_ENV: string = 'POE_UF_REQUIRE_POB';
+
 export interface EnginePaths {
     /** engine/host/bin/luahost.exe (built by engine/host/build.ps1). */
     readonly luahostPath: string;

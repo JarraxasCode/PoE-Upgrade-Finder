@@ -15,6 +15,16 @@
 -- sending, so a cancel takes effect between items.
 --
 -- Commands: ping, loadBuild, stats, strip, tradeQuery, score, baseTypes, slotData, shutdown (see each handler below).
+--
+-- A new command touches five places:
+--   1. its handler here (commands.<name>), and its row in engine/README.md's command table
+--   2. CommandName in packages/engine-client/src/protocol.ts
+--   3. DEFAULT_IDLE_MS in packages/engine-client/src/client.ts (how long it may go quiet)
+--   4. a read<Name> in protocol.ts that checks its data (and its stream events, if it sends any)
+--   5. a method on EngineClient (client.ts) that sends it, through serial() and sendForBuild() if it needs a build
+--
+-- Changes to the loaded build that last one command (a target, a stand-in item, a calc hook) go through
+-- target.with and lua/buildedit.lua, which undo them even on error.
 
 ENGINE_DIR = (arg and arg[0] or ""):match("^(.*[/\\])") or "./"
 
@@ -82,6 +92,9 @@ end
 local statblock = engineRequire("statblock")
 local target = engineRequire("target")
 local slotdata = engineRequire("slotdata")
+local generator = engineRequire("generator")
+local buildedit = engineRequire("buildedit")
+local uniques = engineRequire("uniques")
 
 local pobVersion = launch and launch.versionNumber or "?"
 
@@ -112,13 +125,27 @@ local function requireBuild(req)
 	if req.buildId ~= state.buildId then
 		fail("stale-build", "build " .. tostring(req.buildId) .. " is not loaded (current: " .. state.buildId .. ")")
 	end
+	-- A failed undo may have left a stand-in item in the build: the client must load it again (#39).
+	local tainted = buildedit.tainted()
+	if tainted then
+		fail("stale-build", "build " .. state.buildId .. " must be loaded again: " .. tainted)
+	end
 end
+
+local SECOND_WEAPON_SET_MESSAGE = "The build is saved with weapon set 2 in use, and Weapon 1 and Weapon 2 can only be searched"
+	.. " for weapon set 1 for now. Switch PoB to weapon set 1 and save the build."
 
 local function requireSlot(req)
 	local name = requireString(req, "slot")
 	local slot = build.itemsTab.slots[name]
 	if not slot or slot.nodeId then
 		fail("bad-slot", "no item slot named " .. name)
+	end
+	-- PoB leaves out the weapon slots of the set that isn't in use (CalcSetup.lua's slot loop, the same test),
+	-- so an item put there would change nothing and every gain and weight would read 0 (#110). Scoring
+	-- against weapon set 2 is #35.
+	if slot.weaponSet and slot.weaponSet ~= (build.itemsTab.activeItemSet.useSecondWeaponSet and 2 or 1) then
+		fail("inactive-weapon-set", SECOND_WEAPON_SET_MESSAGE)
 	end
 	return name, slot
 end
@@ -147,16 +174,7 @@ local function calculator()
 	return calcFunc
 end
 
--- PoB's prompt text without colour codes (^1, ^x00FF00) or its "Press Enter/Escape..." key hints.
-local function pobMessage(text)
-	local lines = {}
-	for line in (StripEscapes(tostring(text)) .. "\n"):gmatch("(.-)\r?\n") do
-		if line ~= "" and not line:match("^Press ") then
-			table.insert(lines, line)
-		end
-	end
-	return table.concat(lines, "\n")
-end
+local pobMessage = buildedit.pobMessage
 
 local function itemInfo(item)
 	-- type: PoB's item type ("Boots", "One Handed Sword"), the key of the slot data (slotData).
@@ -196,6 +214,25 @@ local function unparsedLines(item)
 	return lines
 end
 
+-- A damage target that reads 0 because PoB disabled its skill (the wrong weapon, no shield; #36): warns with
+-- PoB's own reason and returns true, else false. Searching for the item that enables the skill is left to the
+-- user for now (Jarraxas, 26 Nov): the search weights come from PoB's current setup, so the user equips any base
+-- that enables the skill in PoB first. Weights of our own, for that and more, are later work.
+local function warnDisabledTarget(ctx, resolved)
+	local reason = target.disableReason(resolved)
+	if not reason then
+		return false
+	end
+	ctx.warn(
+		"target-disabled",
+		"The damage target reads 0: PoB has disabled "
+			.. reason
+			.. ". Searches are weighted from your current setup in PoB, so equip something that enables the skill there first"
+			.. " (any base of the right type will do), or pick another skill under \"Measure damage on\"."
+	)
+	return true
+end
+
 -- Commands --------------------------------------------------------------------------------------------
 local commands = {}
 
@@ -212,6 +249,7 @@ end
 function commands.loadBuild(req, ctx)
 	local xml = requireString(req, "xml")
 	state.buildId = nil
+	buildedit.clearTaint()
 	launch.promptMsg = nil
 	local ok, err = pcall(loadBuildFromXML, xml, type(req.name) == "string" and req.name or "Build")
 	if not ok then
@@ -227,8 +265,6 @@ function commands.loadBuild(req, ctx)
 	end
 	collectgarbage("collect")
 	state.scoresSinceGc = 0
-	state.buildSeq = state.buildSeq + 1
-	state.buildId = "b" .. state.buildSeq
 
 	local equipped = json.array()
 	for _, slot in ipairs(build.itemsTab.orderedSlots) do
@@ -251,9 +287,16 @@ function commands.loadBuild(req, ctx)
 	local baseline = target.with(resolved, function(useFullDps)
 		return statblock.build(calculator()({}, useFullDps), resolved, extraKeys(req), true)
 	end)
-	if baseline.damage == 0 then
+	if baseline.damage == 0 and not warnDisabledTarget(ctx, resolved) then
 		ctx.warn("no-damage-target", "the saved damage target reads 0 (a non-damage main skill?); pick a skill")
 	end
+	if build.itemsTab.activeItemSet.useSecondWeaponSet then
+		ctx.warn("second-weapon-set", SECOND_WEAPON_SET_MESSAGE)
+	end
+	-- The build counts as loaded only now: a save whose saved target fails above (bad-target) leaves no build,
+	-- as the client expects after a failed load (issue #42).
+	state.buildSeq = state.buildSeq + 1
+	state.buildId = "b" .. state.buildSeq
 	return {
 		buildId = state.buildId,
 		pobVersion = pobVersion,
@@ -272,31 +315,66 @@ function commands.loadBuild(req, ctx)
 end
 
 -- stats { buildId, target?, extraKeys? } -> { target, stats }
-function commands.stats(req)
+function commands.stats(req, ctx)
 	requireBuild(req)
 	local resolved = target.resolve(req.target)
 	local keys = extraKeys(req)
 	local block = target.with(resolved, function(useFullDps)
 		return statblock.build(calculator()({}, useFullDps), resolved, keys, true)
 	end)
+	if block.damage == 0 then
+		warnDisabledTarget(ctx, resolved)
+	end
 	return { target = target.describe(resolved), stats = block }
 end
 
--- strip { buildId, slot, target?, extraKeys? } -> { target, slot, stats } with the slot empty
+-- The totals the slot's item carries itself, from PoB's parsed mods (#34): what a strip need is capped at. The
+-- site's pseudo totals count the same lines: "+#% to all Elemental Resistances" is PoB's ElementalResist (added
+-- to each element here), "+# to all Attributes" and hybrid attribute mods already add to Str, Dex and Int.
+-- nil for an empty slot.
+local function itemTotals(slot)
+	local item = build.itemsTab.items[slot.selItemId]
+	-- Ring 2 and Weapon 2 read their own list, as PoB's CalcSetup does ("Left ring slot:" lines and the like).
+	local list = item and (item.modList or (item.slotModList and item.slotModList[slot.slotNum or 1]))
+	if not list then
+		return nil
+	end
+	-- The item's list is a plain array of mods (ItemClass:BuildModListForSlotNum): sum it through a ModList.
+	local mods = new("ModList"):ModList()
+	mods:AddList(list)
+	local function sum(name)
+		return mods:Sum("BASE", nil, name)
+	end
+	local all = sum("ElementalResist")
+	return {
+		Chaos = sum("ChaosResist"),
+		Fire = sum("FireResist") + all,
+		Cold = sum("ColdResist") + all,
+		Lightning = sum("LightningResist") + all,
+		Str = sum("Str"),
+		Dex = sum("Dex"),
+		Int = sum("Int"),
+	}
+end
+
+-- strip { buildId, slot, target?, extraKeys? } -> { target, slot, stats, itemTotals? } with the slot empty
 function commands.strip(req)
 	requireBuild(req)
-	local slotName = requireSlot(req)
+	local slotName, slot = requireSlot(req)
 	local resolved = target.resolve(req.target)
 	local keys = extraKeys(req)
+	local totals = itemTotals(slot)
 	local block = target.with(resolved, function(useFullDps)
 		return statblock.build(calculator()({ repSlotName = slotName, repItem = nil }, useFullDps), resolved, keys, false)
 	end)
-	return { target = target.describe(resolved), slot = slotName, stats = block }
+	return { target = target.describe(resolved), slot = slotName, stats = block, itemTotals = totals }
 end
 
--- tradeQuery { buildId, slot, target?, dpsWeight?, ehpWeight? } -> PoB's trade query generator output.
--- Streams progress events ({ calcs }) every 25 calcs. Weights default to PoB's (1.0 / 0.5). For a
--- one-skill target the main skill is switched in memory and CombinedDPS is weighted instead of FullDPS.
+-- tradeQuery { buildId, slot, target?, dpsWeight?, ehpWeight?, options? } -> PoB's trade query generator output
+-- (lua/generator.lua). Streams progress events ({ calcs, seconds }) every 25 calcs. Weights default to PoB's
+-- (1.0 / 0.5). For a one-skill target the main skill is switched in memory and CombinedDPS is weighted
+-- instead of FullDPS. options: the generator's StartQuery options (generator.DEFAULT_OPTIONS lists them and
+-- their defaults).
 function commands.tradeQuery(req, ctx)
 	requireBuild(req)
 	local slotName, slot = requireSlot(req)
@@ -309,81 +387,19 @@ function commands.tradeQuery(req, ctx)
 	if type(dpsWeight) ~= "number" or type(ehpWeight) ~= "number" or dpsWeight < 0 or ehpWeight < 0 then
 		fail("bad-request", "dpsWeight and ehpWeight must be non-negative numbers")
 	end
+	local options = generator.readOptions(req.options)
 	local resolved = target.resolve(req.target)
-	local damageStat = resolved.kind == "fullDps" and "FullDPS" or "CombinedDPS"
-	local statWeights = {
-		{ label = damageStat, stat = damageStat, weightMult = dpsWeight },
-		{ label = "Effective Hit Pool", stat = "TotalEHP", weightMult = ehpWeight },
-	}
+	local statWeights = generator.statWeights(resolved, dpsWeight, ehpWeight)
 
-	local log = json.array()
-	local calcs = 0
-	local realGetMisc = build.calcsTab.GetMiscCalculator
-	local realConPrintf = ConPrintf
-	local started = os.clock()
-
-	local function run(useFullDps)
-		local generator = new("TradeQueryGenerator"):TradeQueryGenerator({ itemsTab = build.itemsTab })
-		local result = nil
-		generator.requesterCallback = function(_, queryTable, errMsg)
-			result = { query = queryTable, err = errMsg }
-		end
-		generator.requesterContext = {}
-		-- Counts calcs for progress. For a one-skill target it also turns the Full DPS roll-up off: PoB's
-		-- generator calls the calculator with no flag, which means "on", but only FullDPS, FullDotDPS and
-		-- SkillDPS come from the roll-up, and a one-skill target weights CombinedDPS and TotalEHP. Checked in one
-		-- worker on RF, Animate - EarlyMid and Slamraxas: weights, query and baseStatValue are bit-identical
-		-- either way, and Animate's Gloves take about 1 s instead of 30 s.
-		build.calcsTab.GetMiscCalculator = function(tab)
-			local func, base = realGetMisc(tab)
-			return function(override, flag)
-				calcs = calcs + 1
-				if calcs % 25 == 0 then
-					ctx.event("progress", { calcs = calcs, seconds = os.clock() - started })
-				end
-				if useFullDps then
-					return func(override, flag)
-				end
-				return func(override, false)
-			end, base
-		end
-		ConPrintf = function(fmt, ...)
-			local line = string.format(fmt, ...)
-			table.insert(log, line)
-			stderr:write(line, "\n")
-		end
-		generator:StartQuery(slot, {
-			statWeights = statWeights, includeCorrupted = false, includeScourge = false, includeTalisman = false,
-			includeEldritch = "None", includeMirrored = false, maxLevel = nil,
-		})
-		-- As TradeQueryGenerator:OnFrame, but an error inside the coroutine is raised, not swallowed (V14).
-		while generator.calcContext.co do
-			local ok, errMsg = coroutine.resume(generator.calcContext.co, generator)
-			if not ok then
-				error("PoB's trade query generator failed: " .. tostring(errMsg), 0)
-			end
-			if coroutine.status(generator.calcContext.co) == "dead" then
-				generator.calcContext.co = nil
-				generator:FinishQuery()
-			end
-		end
-		if not result then
-			fail("generator-failed", "PoB's trade query generator returned nothing (" .. (log[#log] or "no log") .. ")")
-		end
-		return generator, result
-	end
-
-	local ok, generator, result = pcall(target.with, resolved, run)
-	build.calcsTab.GetMiscCalculator = realGetMisc
-	ConPrintf = realConPrintf
-	if not ok then
-		error(generator, 0)
-	end
+	local run = generator.run(slot, resolved, statWeights, options, function(progress)
+		ctx.event("progress", progress)
+	end)
 
 	local weights = json.array()
-	for _, w in ipairs(generator.modWeights) do
+	for _, w in ipairs(run.generator.modWeights) do
 		table.insert(weights, { id = w.tradeModId, weight = w.weight, meanStatDiff = w.meanStatDiff, invert = w.invert == true })
 	end
+	local result = run.result
 	local query = result.query
 	if type(query) == "table" and type(query.stats) == "table" then
 		json.array(query.stats)
@@ -396,28 +412,78 @@ function commands.tradeQuery(req, ctx)
 	if result.err then
 		ctx.warn("generator", tostring(result.err))
 	end
-	local calcContext = generator.calcContext
+	local calcContext = run.generator.calcContext
 	return {
 		slot = slotName,
 		target = target.describe(resolved),
 		item = item and itemInfo(item) or { name = "", base = "", rarity = "NONE" },
 		category = { query = calcContext.itemCategoryQueryStr, generator = calcContext.itemCategory },
-		statWeights = { { stat = damageStat, weight = dpsWeight }, { stat = "TotalEHP", weight = ehpWeight } },
+		statWeights = { { stat = statWeights[1].stat, weight = dpsWeight }, { stat = "TotalEHP", weight = ehpWeight } },
 		affixQuality = main.defaultItemAffixQuality,
 		baseStatValue = calcContext.baseStatValue,
 		weights = weights,
 		query = query,
 		queryError = result.err,
-		calcs = calcs,
-		seconds = os.clock() - started,
-		log = log,
+		calcs = run.calcs,
+		seconds = run.seconds,
+		log = run.log,
 	}
 end
 
+-- Every unique PoB knows for an item type, scored in the slot and weighted by its own rolls (#113, lua/uniques.lua).
+function commands.uniques(req)
+	requireBuild(req)
+	local slotName = requireSlot(req)
+	local itemType = requireString(req, "itemType")
+	local dpsWeight = req.dpsWeight == nil and 1.0 or req.dpsWeight
+	local ehpWeight = req.ehpWeight == nil and 0.5 or req.ehpWeight
+	if type(dpsWeight) ~= "number" or type(ehpWeight) ~= "number" or dpsWeight < 0 or ehpWeight < 0 then
+		fail("bad-request", "dpsWeight and ehpWeight must be non-negative numbers")
+	end
+	local resolved = target.resolve(req.target)
+	local list = uniques.list(slotName, itemType, resolved, generator.statWeights(resolved, dpsWeight, ehpWeight))
+	return { slot = slotName, itemType = itemType, target = target.describe(resolved), uniques = list }
+end
+
+-- Whether an item of weapon type w2Type can be held beside a Weapon 1 of type w1Type: PoB's rule for Weapon 2
+-- (ItemsTab:IsItemValidForSlot, ItemsTab.lua:2681-2690), which is the game's (G6). w2Type is the Weapon 2
+-- item's type ("Shield", "Quiver", "Wand").
+local function fitsBeside(w1Type, w2Type)
+	if w1Type == "Bow" then
+		return w2Type == "Quiver"
+	end
+	local info = data.weaponTypeInfo
+	if not (info[w1Type] and info[w1Type].oneHand) then
+		return false
+	end
+	if w2Type == "Shield" then
+		return true
+	end
+	return info[w2Type] ~= nil and info[w2Type].oneHand and (w1Type == "Wand") == (w2Type == "Wand")
+end
+
+-- The saved Weapon 2 item when scoring into Weapon 1, else nil.
+local function savedOffHand(slotName)
+	if slotName ~= "Weapon 1" then
+		return nil
+	end
+	local slot = build.itemsTab.slots["Weapon 2"]
+	return slot and build.itemsTab.items[slot.selItemId] or nil
+end
+
 -- score { buildId, slot, items: [text], target?, extraKeys? }
--- Streams one item event per item, in order: { index (0-based), ok, item, stats, unparsed } or
--- { index, ok = false, error }. Each item is swapped in for one compare calc; the build is untouched.
--- A full GC runs every gcEvery scores, between items. Final data: { count, failed, gcRuns, seconds }.
+-- Streams one item event per item, in order: { index (0-based), ok, item, stats, unparsed, validForSlot,
+-- offHandRemoved } or { index, ok = false, error }. Each item is swapped in for one compare calc; the build is
+-- untouched afterwards. A full GC runs every gcEvery scores, between items. Final data: { count, failed,
+-- gcRuns, seconds, offHandRemoved }.
+--
+-- Weapon hands (#39, #101): a Weapon 1 weapon that can't be held beside the saved Weapon 2 (a two-hander, a
+-- bow without a quiver, a wand beside a sword) is scored with Weapon 2 emptied, as the game would take the
+-- off-hand off; its result says offHandRemoved. PoB's compare calc does that by itself only for a staff and
+-- the two-handed sword, axe and mace; a bow keeps the off-hand (PoB bug, pob-internals.md P12), and so do the
+-- other pairs. The engine empties Weapon 2 for all of them alike, once for the batch (one rebuild each way):
+-- the items that keep the off-hand are scored first, then the others inside buildedit.withSlotItem. Events
+-- still go out in order: each result is sent once every earlier one is.
 function commands.score(req, ctx)
 	requireBuild(req)
 	local slotName = requireSlot(req)
@@ -428,44 +494,84 @@ function commands.score(req, ctx)
 	local keys = extraKeys(req)
 	local started = os.clock()
 	local failed = 0
-	target.with(resolved, function(useFullDps)
-		local calcFunc = calculator()
-		for i, text in ipairs(req.items) do
-			local result = { index = i - 1 }
-			local item, err
-			if type(text) ~= "string" then
-				err = "item text must be a string"
-			else
-				item, err = parseItem(text)
-			end
-			if not item then
-				result.ok = false
-				result.error = { code = "parse-failed", message = err }
-				failed = failed + 1
-			else
-				local ok, out = pcall(calcFunc, { repSlotName = slotName, repItem = item }, useFullDps)
-				if ok then
-					result.ok = true
-					result.item = itemInfo(item)
-					result.unparsed = unparsedLines(item)
-					result.validForSlot = build.itemsTab:IsItemValidForSlot(item, slotName) and true or false
-					result.stats = statblock.build(out, resolved, keys, false)
-				else
-					result.ok = false
-					result.error = { code = "calc-failed", message = tostring(out) }
-					failed = failed + 1
-				end
-				state.scoresSinceGc = state.scoresSinceGc + 1
-			end
-			ctx.event("item", result)
-			if gcEvery > 0 and state.scoresSinceGc >= gcEvery then
-				collectgarbage("collect")
-				state.scoresSinceGc = 0
-				state.gcRuns = state.gcRuns + 1
-			end
+	local offHand = savedOffHand(slotName)
+
+	local parsed, parseErrors, withoutOffHand = {}, {}, {}
+	local removedCount = 0
+	for i, text in ipairs(req.items) do
+		if type(text) ~= "string" then
+			parseErrors[i] = "item text must be a string"
+		else
+			parsed[i], parseErrors[i] = parseItem(text)
 		end
-	end)
-	return { count = #req.items, failed = failed, gcRuns = state.gcRuns, seconds = os.clock() - started }
+		local item = parsed[i]
+		if offHand and item and item.base.weapon and not fitsBeside(item.base.type, offHand.type) then
+			withoutOffHand[i] = true
+			removedCount = removedCount + 1
+		end
+	end
+
+	local results, nextToSend = {}, 1
+	local function flush()
+		while results[nextToSend] do
+			ctx.event("item", results[nextToSend])
+			nextToSend = nextToSend + 1
+		end
+	end
+
+	local function scoreOne(i, calcFunc, useFullDps)
+		local result = { index = i - 1 }
+		local item = parsed[i]
+		if not item then
+			result.ok = false
+			result.error = { code = "parse-failed", message = parseErrors[i] }
+			failed = failed + 1
+			return result
+		end
+		local ok, out = pcall(calcFunc, { repSlotName = slotName, repItem = item }, useFullDps)
+		if ok then
+			result.ok = true
+			result.item = itemInfo(item)
+			result.unparsed = unparsedLines(item)
+			result.validForSlot = build.itemsTab:IsItemValidForSlot(item, slotName) and true or false
+			result.offHandRemoved = withoutOffHand[i] == true
+			result.stats = statblock.build(out, resolved, keys, false)
+		else
+			result.ok = false
+			result.error = { code = "calc-failed", message = tostring(out) }
+			failed = failed + 1
+		end
+		state.scoresSinceGc = state.scoresSinceGc + 1
+		return result
+	end
+
+	-- Scores the items whose withoutOffHand flag is `removed`, in order.
+	local function scoreGroup(removed)
+		target.with(resolved, function(useFullDps)
+			local calcFunc = calculator()
+			for i = 1, #req.items do
+				if (withoutOffHand[i] == true) == removed then
+					flush()
+					results[i] = scoreOne(i, calcFunc, useFullDps)
+					flush()
+					if gcEvery > 0 and state.scoresSinceGc >= gcEvery then
+						collectgarbage("collect")
+						state.scoresSinceGc = 0
+						state.gcRuns = state.gcRuns + 1
+					end
+				end
+			end
+		end)
+	end
+
+	scoreGroup(false)
+	if removedCount > 0 then
+		buildedit.withSlotItem("Weapon 2", nil, function()
+			scoreGroup(true)
+		end)
+	end
+	flush()
+	return { count = #req.items, failed = failed, gcRuns = state.gcRuns, seconds = os.clock() - started, offHandRemoved = removedCount }
 end
 
 -- baseTypes {} -> { types: [{ baseType, bases }] }: every item type with bases, for picking a base type.

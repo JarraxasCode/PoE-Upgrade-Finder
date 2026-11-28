@@ -4,6 +4,7 @@ import type { RunHeader, RunSnapshot, UiItem, UiSearch } from '@poe-upgrade-find
 import {
     chipValue,
     currentItemText,
+    foldCopies,
     slotWasEmpty,
     bandRows,
     blendText,
@@ -14,7 +15,9 @@ import {
     planChip,
     priceText,
     progress,
+    skippedText,
 } from '../src/run-model.ts';
+import type { FoldedItem } from '../src/run-model.ts';
 
 const header: RunHeader = {
     runId: 'r1',
@@ -39,6 +42,9 @@ const header: RunHeader = {
     weightedStats: 20,
     hardNeeds: [],
     plan: null,
+    unique: null,
+    uniqueNotes: [],
+    sockets: [],
     levelFilter: 'Up to level 92 (your level)',
     searchedFor: [],
     bands: [
@@ -57,6 +63,7 @@ function item(id: string, gain: number | null, over: Partial<UiItem> = {}): UiIt
         price: { amount: 5, currency: 'chaos' },
         chaos: 5,
         bandId: 'b0',
+        role: 'main',
         gainPct: gain,
         dpsPct: gain,
         ehpPct: gain,
@@ -200,4 +207,70 @@ test('an empty slot reads as one, not "your nothing" (issue #33)', () => {
     assert.equal(currentItemText(h), 'an empty slot');
     const worn = { currentView: null, currentItem: 'Gale Talons, Leviathan Gauntlets' } as unknown as RunHeader;
     assert.equal(currentItemText(worn), 'your Gale Talons, Leviathan Gauntlets');
+});
+
+test('skipped listings by reason (#39)', () => {
+    assert.equal(skippedText({ 'not-for-slot': 0, unidentified: 0, 'already-fetched': 0, malformed: 0, 'excluded-mod': 0 }), null);
+    assert.equal(
+        skippedText({ 'not-for-slot': 10, unidentified: 2, 'already-fetched': 0, malformed: 1, 'excluded-mod': 0 }),
+        "13 skipped: 10 PoB won't equip in the slot, 2 unidentified, 1 couldn't be read.",
+    );
+});
+
+test('listings dropped for an excluded hybrid name the mod, each with its count when there are several (#38)', () => {
+    const esMana: string = '+# to maximum Energy Shield / +# to maximum Mana';
+    const esLife: string = '+# to maximum Energy Shield / +# to maximum Life';
+    const none = { 'not-for-slot': 0, unidentified: 0, 'already-fetched': 0, malformed: 0 } as const;
+    assert.equal(
+        skippedText({ ...none, 'excluded-mod': 8 }, [{ name: esMana, dropped: 8 }]),
+        `8 skipped: 8 had an excluded mod (${esMana}).`,
+    );
+    assert.equal(
+        skippedText({ ...none, unidentified: 1, 'excluded-mod': 15 }, [
+            { name: esMana, dropped: 8 },
+            { name: esLife, dropped: 7 },
+        ]),
+        `16 skipped: 1 unidentified, 15 had an excluded mod (${esMana}: 8; ${esLife}: 7).`,
+    );
+});
+
+const KAOM_TEXT: string = "Rarity: Unique\nKaom's Roots\nTitan Greaves\n--------\n+200 to maximum Life\nUnwavering Stance\n";
+
+test('foldCopies: copies with the same text but other prices and notes fold into the cheapest', () => {
+    const a = item('a', 1, { text: `${KAOM_TEXT}--------\nNote: ~b/o 9 chaos\n`, chaos: 9 });
+    const b = item('b', 1, { text: `${KAOM_TEXT}--------\nNote: ~price 4 chaos\n`, chaos: 4 });
+    const c = item('c', 1, { text: `${KAOM_TEXT}\n\n`, chaos: 6 });
+    const folded: FoldedItem[] = foldCopies([a, b, c]);
+    assert.equal(folded.length, 1);
+    assert.equal(folded[0]?.item.id, 'b');
+    assert.equal(folded[0]?.copies, 2);
+    assert.equal(folded[0]?.fromChaos, 4);
+});
+
+test('foldCopies: one different line keeps them apart, in the order they came', () => {
+    const a = item('a', 1, { text: KAOM_TEXT, chaos: 9 });
+    const b = item('b', 1, { text: KAOM_TEXT.replace('+200', '+199'), chaos: 4 });
+    assert.deepEqual(
+        foldCopies([a, b]).map((f) => [f.item.id, f.copies]),
+        [
+            ['a', 0],
+            ['b', 0],
+        ],
+    );
+});
+
+test('foldCopies: an unpriced copy is never shown over a priced one; a preferred copy is', () => {
+    const a = item('a', 1, { text: KAOM_TEXT, chaos: null });
+    const b = item('b', 1, { text: KAOM_TEXT, chaos: 7 });
+    assert.equal(foldCopies([a, b])[0]?.item.id, 'b');
+    const c = item('c', 1, { text: KAOM_TEXT, chaos: 3 });
+    assert.equal(foldCopies([b, c], new Set(['b']))[0]?.item.id, 'b');
+});
+
+test('foldCopies: "from" is the cheapest copy, even when a pricier tagged copy is shown', () => {
+    const tagged = item('t', 1, { text: KAOM_TEXT, chaos: 9 });
+    const cheap = item('c', 1, { text: KAOM_TEXT, chaos: 3 });
+    const f = foldCopies([tagged, cheap], new Set(['t']))[0];
+    assert.equal(f?.item.id, 't');
+    assert.equal(f?.fromChaos, 3);
 });

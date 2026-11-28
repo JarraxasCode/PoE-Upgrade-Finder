@@ -5,7 +5,7 @@
 import { array, boolean, isRecord, number, optional, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
 import { readItemDisplay, stripMarkup } from './item-display.ts';
-import type { ItemDisplay } from './item-display.ts';
+import type { ItemView } from '@poe-upgrade-finder/vocab';
 
 export interface SearchResponse {
     /** The search id; fetches may pass it as ?query= (V16: not needed). */
@@ -54,8 +54,13 @@ export interface TradeListing {
      * Empty when the response doesn't tie lines to stats.
      */
     readonly statLines: readonly StatLine[];
+    /**
+     * Each line of item.extended.hashes with the mods behind it (G19): a hybrid's stats share one mod index in one
+     * domain, so this tells the hybrid apart from the same stats on separate mods (#38). Empty when not given.
+     */
+    readonly statSources: readonly StatSource[];
     /** What a tooltip shows (image, properties, mod groups); best effort, never fails the listing. */
-    readonly display: ItemDisplay;
+    readonly display: ItemView;
 }
 
 /** The kinds of mod line a StatLine can be. */
@@ -69,6 +74,15 @@ export interface StatLine {
     readonly kind: StatLineKind;
     /** The line as shown, markup removed ("+14% to Item Rarity"). */
     readonly text: string;
+}
+
+/** One line of item.extended.hashes: a stat in one domain and the indices of the mods that carry it. */
+export interface StatSource {
+    readonly kind: StatLineKind;
+    /** As the hashes name it, with the domain: "crafted.stat_2250533757". */
+    readonly statId: string;
+    /** Indices into the domain's mods; two or more when the line is summed from several mods. */
+    readonly mods: readonly number[];
 }
 
 export interface FetchResponse {
@@ -125,6 +139,38 @@ function readStatIds(value: unknown): string[] {
 
 function isStatLineKind(value: string): value is StatLineKind {
     return (STAT_LINE_KINDS as readonly string[]).includes(value);
+}
+
+/** item.extended.hashes as stat sources: { kind: [[statId, [modIndex...]], ...] }. Anything unexpected is skipped. */
+function readStatSources(value: unknown): StatSource[] {
+    if (!isRecord(value)) {
+        return [];
+    }
+    const out: StatSource[] = [];
+    for (const [kind, entries] of Object.entries(value)) {
+        if (!isStatLineKind(kind) || !Array.isArray(entries)) {
+            continue;
+        }
+        for (const entry of entries) {
+            if (!Array.isArray(entry)) {
+                continue;
+            }
+            const id: unknown = entry[0];
+            const list: unknown = entry[1];
+            const mods: number[] = [];
+            if (Array.isArray(list)) {
+                for (const m of list) {
+                    if (typeof m === 'number' && Number.isInteger(m) && m >= 0) {
+                        mods.push(m);
+                    }
+                }
+            }
+            if (typeof id === 'string' && Array.isArray(list) && mods.length > 0 && mods.length === list.length) {
+                out.push({ kind: kind, statId: id, mods: mods });
+            }
+        }
+    }
+    return out;
 }
 
 /**
@@ -200,6 +246,7 @@ export function readListing(value: unknown, path: string): TradeListing {
         seller: isRecord(account) ? optional(account['name'], `${path}.listing.account.name`, string) : undefined,
         statIds: readStatIds(extended['hashes']),
         statLines: readStatLines(item, extended['hashes']),
+        statSources: readStatSources(extended['hashes']),
         display: readItemDisplay(item),
     };
 }

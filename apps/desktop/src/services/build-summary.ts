@@ -1,7 +1,6 @@
 // What the Search view shows about the loaded build: the damage-target choices (from PoB's skill groups),
 // the baseline line, and warnings. Pure, so it is unit-tested on recorded engine output.
 
-import { parseTarget } from '@poe-upgrade-finder/cli/args';
 import type {
     ActiveSkillInfo,
     EngineWarning,
@@ -12,12 +11,27 @@ import type {
     StatBlock,
     TargetRequest,
 } from '@poe-upgrade-finder/engine-client';
-import type { BuildSummary, EquippedInfo, ItemView, TargetOption } from '@poe-upgrade-finder/ipc';
+import type { BuildSummary, EquippedInfo, TargetOption } from '@poe-upgrade-finder/ipc';
 import type { BaseArt } from './base-art.ts';
+import type { ItemView } from '@poe-upgrade-finder/vocab';
 
-/** A target id (saved, full, skill:G.A[.P]) as the engine's request. */
+/** A target id ("saved", "full", or "skill:<group>.<activeSkill>[.<part>]", PoB's 1-based indices) as the engine's request. */
 export function targetRequest(id: string): TargetRequest {
-    return parseTarget(id);
+    if (id === 'saved') {
+        return { kind: 'saved' };
+    }
+    if (id === 'full') {
+        return { kind: 'fullDps' };
+    }
+    const match: RegExpMatchArray | null = /^skill:(\d+)\.(\d+)(?:\.(\d+))?$/.exec(id);
+    if (!match?.[1] || !match[2]) {
+        throw new Error(`bad damage target ${id}: use saved, full or skill:<group>.<skill>[.<part>]`);
+    }
+    const group: number = Number(match[1]);
+    const activeSkill: number = Number(match[2]);
+    return match[3] === undefined
+        ? { kind: 'skill', group: group, activeSkill: activeSkill }
+        : { kind: 'skill', group: group, activeSkill: activeSkill, part: Number(match[3]) };
 }
 
 export function resolvedLabel(target: ResolvedTarget): string {
@@ -100,7 +114,8 @@ export function equippedInfo(e: EquippedItem, art: ArtLookup): EquippedInfo {
 export function buildSummary(input: SummaryInput): BuildSummary {
     const { load, stats } = input;
     const warnings: string[] = input.warnings.map((w: EngineWarning) => w.message);
-    if (!(stats.damage > 0)) {
+    // PoB's own reason (target-disabled, #36) says it better than the generic hint.
+    if (!(stats.damage > 0) && !input.warnings.some((w: EngineWarning) => w.code === 'target-disabled')) {
         warnings.push(
             'The damage target reads 0 (for example an aura as the main skill). Pick the skill to measure under "Measure damage on".',
         );

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { propertyLine, readItemDisplay, stripMarkup } from '../src/item-display.ts';
-import type { DisplayLine, ItemDisplay } from '../src/item-display.ts';
+import type { ItemLine, ItemView } from '@poe-upgrade-finder/vocab';
 
 const ICON: string = 'https://web.poecdn.com/gen/image/abc/0c80b843d0/BootsDexInt3.png';
 
@@ -41,10 +41,10 @@ const BOOTS: unknown = {
     frameType: 2,
 };
 
-const text = (line: DisplayLine): string => line.map((p) => p.text).join('');
+const text = (line: ItemLine): string => line.map((p) => p.text).join('');
 
 test('reads a signed-in fetch item into tooltip data', () => {
-    const d: ItemDisplay = readItemDisplay(BOOTS);
+    const d: ItemView = readItemDisplay(BOOTS);
     assert.equal(d.icon, ICON);
     assert.deepEqual([d.width, d.height, d.rarity, d.name, d.typeLine, d.itemLevel], [2, 2, 'rare', 'Mind March', "Assassin's Boots", 85]);
     assert.deepEqual(d.influences, ['elder']);
@@ -62,7 +62,7 @@ test('reads a signed-in fetch item into tooltip data', () => {
 });
 
 test('accepts the public API shape: mods as strings, separate crafted and fractured groups', () => {
-    const d: ItemDisplay = readItemDisplay({
+    const d: ItemView = readItemDisplay({
         frameType: 2,
         name: 'X',
         typeLine: 'Iron Ring',
@@ -83,7 +83,7 @@ test('accepts the public API shape: mods as strings, separate crafted and fractu
 });
 
 test('never throws, and drops what it cannot read', () => {
-    const d: ItemDisplay = readItemDisplay({
+    const d: ItemView = readItemDisplay({
         icon: 'https://evil.example/x.png',
         properties: [null, 3, { name: 'Armour', values: 'nope' }],
         explicitMods: [5, { x: 1 }],

@@ -2473,6 +2473,10 @@ svg.weight-bar .fill {
     color: #a9c4f5;
     border-color: color-mix(in srgb, #6fa8ff 35%, var(--line));
 }
+.plan-summary .sum-sockets {
+    color: var(--text);
+    border-color: var(--line-strong);
+}
 .plan-summary .sum-empty {
     color: var(--muted);
 }
@@ -3087,4 +3091,152 @@ svg.weight-bar .fill {
 /* Build figures from the cache while PoB loads the save again: shown, a little dimmed */
 .build-kpis.refreshing {
     opacity: 0.72;
+}
+
+/* The notices strip (#43): failures and main's notices, bottom right over every view */
+.notices {
+    position: fixed;
+    right: 16px;
+    bottom: 16px;
+    z-index: 60;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: min(440px, calc(100vw - 32px));
+}
+.notice-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 10px 10px 10px 14px;
+    border: 1px solid var(--line-strong);
+    border-left: 4px solid var(--muted);
+    border-radius: var(--radius);
+    background: var(--surface-3);
+    color: var(--text);
+    font-size: 13px;
+    box-shadow: 0 6px 20px rgb(0 0 0 / 40%);
+}
+.notice-item.warn {
+    border-left-color: var(--warn);
+}
+.notice-item.error {
+    border-left-color: var(--fail);
+}
+.notice-text {
+    flex: 1;
+    overflow-wrap: anywhere;
+}
+.notice-close {
+    flex: none;
+    border: 0;
+    background: none;
+    color: var(--muted);
+    font-size: 18px;
+    line-height: 1;
+    padding: 2px 6px;
+    cursor: pointer;
+}
+.notice-close:hover {
+    color: var(--text-strong);
+}
+/* A slot plan whose last save failed (#43) */
+.plan-unsaved {
+    color: var(--fail);
+    font-size: 13px;
+}
+
+/* Rare / Unique switch and the unique picker (Search view, #113) */
+.mode-switch {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-wrap: wrap;
+    margin: 4px 0 10px;
+}
+.mode-option {
+    padding: 6px 14px;
+    border: 1px solid var(--line-strong);
+    border-radius: 6px;
+    background: var(--surface-2);
+    color: inherit;
+    cursor: pointer;
+}
+.mode-option.on {
+    border-color: var(--accent);
+    color: var(--accent);
+}
+.unique-search {
+    width: 100%;
+    margin: 6px 0 8px;
+}
+.unique-list {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 2px;
+    max-height: 420px;
+    overflow-y: auto;
+}
+.unique-row {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    gap: 10px;
+    align-items: baseline;
+    width: 100%;
+    padding: 6px 8px;
+    border: 1px solid transparent;
+    border-radius: 6px;
+    background: none;
+    color: inherit;
+    text-align: left;
+    cursor: pointer;
+}
+.unique-row:hover {
+    background: var(--surface-2);
+}
+.unique-row.on {
+    border-color: var(--it-unique);
+    background: var(--surface-2);
+}
+.unique-name {
+    color: var(--it-unique);
+}
+.unique-weights {
+    margin-top: 12px;
+}
+.find .copies {
+    margin: 2px 0 0;
+}
+
+/* Socket filters (#58): the trade site's R/G/B/W/Min/Max boxes, colours as a thin underline. */
+.socket-input {
+    width: 44px;
+    min-height: 28px;
+    padding: 0 6px;
+    text-align: center;
+    border-bottom-width: 2px;
+}
+.socket-input.socket-r {
+    border-bottom-color: #c94a4a;
+}
+.socket-input.socket-g {
+    border-bottom-color: #5aa35a;
+}
+.socket-input.socket-b {
+    border-bottom-color: #5a7fd6;
+}
+.socket-input.socket-w {
+    border-bottom-color: #d8d8d8;
+}
+.socket-input[aria-invalid='true'] {
+    border-color: var(--fail);
+    color: var(--fail);
+}
+.socket-row .stat-range-label {
+    min-width: 88px;
+}
+.socket-card {
+    align-self: start;
 }

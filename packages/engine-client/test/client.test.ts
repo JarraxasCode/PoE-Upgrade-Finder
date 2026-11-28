@@ -1,4 +1,7 @@
 import assert from 'node:assert/strict';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { test } from 'node:test';
 import { EngineClient, EngineError } from '../src/index.ts';
@@ -156,6 +159,29 @@ test('a hang times out, fails that item and carries on', async () => {
         assert.equal(summary.restarts, 1);
     } finally {
         await engine.shutdown();
+    }
+});
+
+test('a reload that fails in the new worker is retried by the next call, not left stale (issue #42)', async () => {
+    const dir: string = mkdtempSync(join(tmpdir(), 'uf-engine-'));
+    const flag: string = join(dir, 'fail-load');
+    const engine: EngineClient = new EngineClient({
+        command: { command: process.execPath, args: [fake, 'normal'], env: { FAKE_FAIL_LOAD_FILE: flag } },
+        startupTimeoutMs: 5000,
+        maxRestartsPerScore: 1,
+    });
+    try {
+        await engine.loadBuild('<xml/>');
+        writeFileSync(flag, '');
+        // The crash replaces the worker, and the reload into the new one fails.
+        await assert.rejects(scoreAll(engine, ['CRASH', 'b'], 2), /reload failed once/);
+        // The next call starts another worker, reloads the build and works.
+        const stats = await engine.stats();
+        assert.equal(stats.stats.damage, 100);
+        assert.equal(engine.starts, 3);
+    } finally {
+        await engine.shutdown();
+        rmSync(dir, { recursive: true, force: true });
     }
 });
 

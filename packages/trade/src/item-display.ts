@@ -5,61 +5,10 @@
 
 import { isRecord } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
+import { ICON_ORIGIN, ITEM_INFLUENCES, ITEM_MOD_KINDS } from '@poe-upgrade-finder/vocab';
+import type { ItemInfluence, ItemLine, ItemMod, ItemModKind, ItemPart, ItemRarity, ItemTone, ItemView } from '@poe-upgrade-finder/vocab';
 
-/** How a value is coloured in game: the trade API's value type (0 plain, 1 augmented, 2 unmet, 4-7 elements). */
-export type DisplayTone = 'plain' | 'augmented' | 'unmet' | 'fire' | 'cold' | 'lightning' | 'chaos' | 'label';
-
-export interface DisplayPart {
-    readonly text: string;
-    readonly tone: DisplayTone;
-}
-
-/** One line of the tooltip, in parts so each value can be coloured. */
-export type DisplayLine = readonly DisplayPart[];
-
-export type ModKind = 'enchant' | 'implicit' | 'explicit' | 'crafted' | 'fractured' | 'scourge' | 'crucible';
-export const MOD_KINDS: readonly ModKind[] = ['enchant', 'implicit', 'explicit', 'crafted', 'fractured', 'scourge', 'crucible'];
-
-export interface DisplayMod {
-    readonly text: string;
-    readonly kind: ModKind;
-}
-
-export type DisplayRarity = 'normal' | 'magic' | 'rare' | 'unique' | 'other';
-export const DISPLAY_RARITIES: readonly DisplayRarity[] = ['normal', 'magic', 'rare', 'unique', 'other'];
-
-export type Influence = 'shaper' | 'elder' | 'crusader' | 'redeemer' | 'hunter' | 'warlord' | 'searing' | 'tangled';
-export const INFLUENCES: readonly Influence[] = ['shaper', 'elder', 'crusader', 'redeemer', 'hunter', 'warlord', 'searing', 'tangled'];
-
-export interface ItemDisplay {
-    /** An image on web.poecdn.com, or null (nothing else passes the renderer's CSP). */
-    readonly icon: string | null;
-    /** Inventory cells, for the image's shape. */
-    readonly width: number;
-    readonly height: number;
-    readonly rarity: DisplayRarity;
-    /** Empty for normal and magic items, whose whole name is the type line. */
-    readonly name: string;
-    readonly typeLine: string;
-    readonly influences: readonly Influence[];
-    readonly properties: readonly DisplayLine[];
-    /** "Requires Level 64, Dex 62", or empty. */
-    readonly requirements: DisplayLine;
-    /** "R-G-B B", or empty. */
-    readonly sockets: string;
-    readonly itemLevel: number | null;
-    /** Enchants, then implicits, then the rest (explicit, crafted, fractured...) in the site's order. */
-    readonly enchants: readonly DisplayMod[];
-    readonly implicits: readonly DisplayMod[];
-    readonly explicits: readonly DisplayMod[];
-    readonly corrupted: boolean;
-    readonly mirrored: boolean;
-}
-
-/** Only images from GGG's CDN are kept; the renderer's CSP allows nothing else. */
-export const ICON_ORIGIN: string = 'https://web.poecdn.com/';
-
-const TONES: Readonly<Record<number, DisplayTone>> = {
+const TONES: Readonly<Record<number, ItemTone>> = {
     0: 'plain',
     1: 'augmented',
     2: 'unmet',
@@ -87,7 +36,7 @@ function list(value: unknown): readonly unknown[] {
     return Array.isArray(value) ? value : [];
 }
 
-function readRarity(item: JsonRecord): DisplayRarity {
+function readRarity(item: JsonRecord): ItemRarity {
     const r: string = (str(item['rarity']) ?? '').toLowerCase();
     if (r === 'normal' || r === 'magic' || r === 'rare' || r === 'unique') {
         return r;
@@ -107,8 +56,8 @@ function readRarity(item: JsonRecord): DisplayRarity {
 }
 
 /** A property or requirement's values: [["233", 1], ...]. */
-function readValues(value: unknown): DisplayPart[] {
-    const parts: DisplayPart[] = [];
+function readValues(value: unknown): ItemPart[] {
+    const parts: ItemPart[] = [];
     for (const v of list(value)) {
         if (Array.isArray(v) && typeof v[0] === 'string') {
             parts.push({ text: v[0], tone: TONES[int(v[1]) ?? 0] ?? 'plain' });
@@ -117,9 +66,9 @@ function readValues(value: unknown): DisplayPart[] {
     return parts;
 }
 
-function joinValues(values: readonly DisplayPart[]): DisplayPart[] {
-    const out: DisplayPart[] = [];
-    values.forEach((v: DisplayPart, k: number) => {
+function joinValues(values: readonly ItemPart[]): ItemPart[] {
+    const out: ItemPart[] = [];
+    values.forEach((v: ItemPart, k: number) => {
         if (k > 0) {
             out.push({ text: ', ', tone: 'label' });
         }
@@ -132,12 +81,12 @@ function joinValues(values: readonly DisplayPart[]): DisplayPart[] {
  * One property line by its display mode: 0 "Name: v", 1 "v Name", 3 a template with {0}, {1}... A property
  * with no values is just its name (a weapon's class line). Mode 2 (an experience bar) isn't shown.
  */
-export function propertyLine(value: unknown): DisplayLine | undefined {
+export function propertyLine(value: unknown): ItemLine | undefined {
     if (!isRecord(value)) {
         return undefined;
     }
     const name: string = stripMarkup(str(value['name']) ?? '');
-    const values: DisplayPart[] = readValues(value['values']);
+    const values: ItemPart[] = readValues(value['values']);
     const mode: number = int(value['displayMode']) ?? 0;
     if (values.length === 0) {
         return name === '' ? undefined : [{ text: name, tone: 'label' }];
@@ -146,10 +95,10 @@ export function propertyLine(value: unknown): DisplayLine | undefined {
         return [...joinValues(values), { text: ` ${name}`, tone: 'label' }];
     }
     if (mode === 3) {
-        const parts: DisplayPart[] = [];
+        const parts: ItemPart[] = [];
         for (const piece of name.split(/(\{\d+\})/)) {
             const m: RegExpMatchArray | null = /^\{(\d+)\}$/.exec(piece);
-            const v: DisplayPart | undefined = m === null ? undefined : values[Number(m[1])];
+            const v: ItemPart | undefined = m === null ? undefined : values[Number(m[1])];
             if (v !== undefined) {
                 parts.push(v);
             } else if (piece !== '') {
@@ -165,14 +114,14 @@ export function propertyLine(value: unknown): DisplayLine | undefined {
 }
 
 /** "Requires Level 64, Dex 62, Int 62": name then value, as poe.ninja shows it. */
-function requirementsLine(value: unknown): DisplayLine {
-    const parts: DisplayPart[] = [];
+function requirementsLine(value: unknown): ItemLine {
+    const parts: ItemPart[] = [];
     for (const r of list(value)) {
         if (!isRecord(r)) {
             continue;
         }
         const name: string = stripMarkup(str(r['name']) ?? '');
-        const values: DisplayPart[] = readValues(r['values']);
+        const values: ItemPart[] = readValues(r['values']);
         if (name === '' || values.length === 0) {
             continue;
         }
@@ -197,20 +146,20 @@ function socketsText(value: unknown): string {
     return out;
 }
 
-function isModKind(value: string | undefined): value is ModKind {
-    return value !== undefined && (MOD_KINDS as readonly string[]).includes(value);
+function isModKind(value: string | undefined): value is ItemModKind {
+    return value !== undefined && (ITEM_MOD_KINDS as readonly string[]).includes(value);
 }
 
 /** A mod group: strings (the public API) or { description, domain } objects (the signed-in site). */
-function readMods(value: unknown, kind: ModKind): DisplayMod[] {
-    const mods: DisplayMod[] = [];
+function readMods(value: unknown, kind: ItemModKind): ItemMod[] {
+    const mods: ItemMod[] = [];
     for (const m of list(value)) {
         const text: string | undefined = typeof m === 'string' ? m : isRecord(m) ? str(m['description']) : undefined;
         if (text === undefined) {
             continue;
         }
         const domain: string | undefined = isRecord(m) ? str(m['domain']) : undefined;
-        const k: ModKind = isModKind(domain) ? domain : kind;
+        const k: ItemModKind = isModKind(domain) ? domain : kind;
         for (const line of stripMarkup(text).split('\n')) {
             if (line.trim() !== '') {
                 mods.push({ text: line, kind: k });
@@ -220,10 +169,10 @@ function readMods(value: unknown, kind: ModKind): DisplayMod[] {
     return mods;
 }
 
-function readInfluences(item: JsonRecord): Influence[] {
-    const out: Influence[] = [];
+function readInfluences(item: JsonRecord): ItemInfluence[] {
+    const out: ItemInfluence[] = [];
     const influences: unknown = item['influences'];
-    for (const i of INFLUENCES) {
+    for (const i of ITEM_INFLUENCES) {
         const on: boolean = (isRecord(influences) && influences[i] === true) || item[i] === true;
         if (on) {
             out.push(i);
@@ -238,13 +187,13 @@ function readIcon(value: unknown): string | null {
 }
 
 /** The tooltip data for a fetch response's `item`. Never throws. */
-export function readItemDisplay(value: unknown): ItemDisplay {
+export function readItemDisplay(value: unknown): ItemView {
     const item: JsonRecord = isRecord(value) ? value : {};
-    const rarity: DisplayRarity = readRarity(item);
+    const rarity: ItemRarity = readRarity(item);
     const typeLine: string = stripMarkup(str(item['typeLine']) ?? str(item['baseType']) ?? '');
-    const properties: DisplayLine[] = [];
+    const properties: ItemLine[] = [];
     for (const p of list(item['properties'])) {
-        const line: DisplayLine | undefined = propertyLine(p);
+        const line: ItemLine | undefined = propertyLine(p);
         if (line !== undefined) {
             properties.push(line);
         }

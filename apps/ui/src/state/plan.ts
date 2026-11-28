@@ -3,28 +3,23 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import { emptySlotPlan } from '@poe-upgrade-finder/ipc';
-import type { BuildSettings, GearSlot, SlotEditorData, SlotPlan } from '@poe-upgrade-finder/ipc';
+import type { BuildSettings, SlotEditorData } from '@poe-upgrade-finder/ipc';
 import { messageOf } from '@poe-upgrade-finder/validate';
 import { call } from '../api.ts';
-import { setDefences } from '../slot-plan-model.ts';
-import { buildSettings, rememberForBuild } from './builds.ts';
+import { isBlankPlan } from '../slot-plan-model.ts';
+import { buildSettings, saveForBuild } from './builds.ts';
 import { readyValue } from './loadable.ts';
+import { emptySlotPlan } from '@poe-upgrade-finder/vocab';
+import type { GearSlot, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 /** The selected build's plan for a slot, or an empty one. */
 export function planFor(slot: GearSlot): SlotPlan {
     return readyValue(buildSettings.value)?.slotPlans[slot] ?? emptySlotPlan(slot);
 }
 
-/** An empty plan: no item type, no base, no mods, no defences (searches as v0.1 did). */
+/** An empty plan: no item type, base, mods, defences, totals or socket filters (searches as v0.1 did). */
 export function isEmptySlotPlan(plan: SlotPlan): boolean {
-    return (
-        plan.itemType === null &&
-        plan.base === null &&
-        plan.picks.length === 0 &&
-        setDefences(plan).length === 0 &&
-        (plan.totals ?? []).length === 0
-    );
+    return isBlankPlan(plan);
 }
 
 /** Saves a slot's plan in the build's settings at once; an empty plan is removed. */
@@ -39,7 +34,7 @@ export function setSlotPlan(plan: SlotPlan): void {
     } else {
         next[plan.slot] = plan;
     }
-    void rememberForBuild({ slotPlans: next });
+    void saveForBuild({ slotPlans: next });
 }
 
 export type EditorDataState =

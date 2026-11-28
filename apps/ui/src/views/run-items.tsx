@@ -3,11 +3,12 @@
 
 import { useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { StatChange, UiBand, RunHeader, UiItem } from '@poe-upgrade-finder/ipc';
+import type { StatChange, RunHeader, UiItem } from '@poe-upgrade-finder/ipc';
 import { compact, signedPct } from '../format.ts';
 import { HoverItem, Info, ItemCard, ItemImage } from './item-card.tsx';
 import { Price } from './price.tsx';
-import { bandLabel, blendText, currentItemText } from '../run-model.ts';
+import { bandLabel, blendText, currentItemText, foldCopies } from '../run-model.ts';
+import type { FoldedItem } from '../run-model.ts';
 import { linkMessage, openBuyLink } from '../state/run.ts';
 import { PlanChecks, PlanChip } from './plan-checks.tsx';
 
@@ -23,6 +24,10 @@ interface ItemRowProps {
     readonly onToggle: () => void;
     /** Keeps tooltip keys unique when one item is listed twice (the pick and the list). */
     readonly tipScope: string;
+    /** Identical listings folded under this one (#113). */
+    readonly copies: number;
+    /** The cheapest of them in chaos, this one included. */
+    readonly fromChaos: number | null;
 }
 
 const TAG_INFO: Readonly<Record<string, readonly string[]>> = {
@@ -32,7 +37,7 @@ const TAG_INFO: Readonly<Record<string, readonly string[]>> = {
     'Best gain': [
         'The biggest overall gain in your budget among items that pass the floors. Not a pick: it is under the minimum gain, or a cheaper item comes close enough.',
     ],
-    'Over budget': ['Beats everything in your budget, from the "slightly over budget" band. Shown so you can judge it; never picked.'],
+    'Over budget': ['Beats everything in your budget, priced just over it. Shown so you can judge it; never picked.'],
 };
 
 /** The stat changes as chips: green when they go up, red when down (as PoB's compare does). */
@@ -106,7 +111,6 @@ function ItemRow(props: ItemRowProps): JSX.Element {
     const h: RunHeader = props.header;
     const msg = linkMessage.value;
     const key: string = `${props.tipScope}:${i.id}`;
-    const band: UiBand | undefined = h.bands.find((b: UiBand) => b.id === i.bandId);
     return (
         <li class={props.tag === undefined ? 'find' : 'find tagged'}>
             <div class="find-main">
@@ -141,10 +145,10 @@ function ItemRow(props: ItemRowProps): JSX.Element {
                     <Info
                         tipKey={`${key}:band`}
                         title={`Price band: ${bandLabel(h, i.bandId)}`}
-                        class={`band-chip${band?.role === 'over' ? ' over' : ''}`}
+                        class={`band-chip${i.role === 'over' ? ' over' : ''}`}
                         lines={[
                             "Found by this band's own searches. Each price band is searched separately so cheap listings aren't crowded out by expensive ones.",
-                            ...(band?.role === 'over' ? ['Just over your budget: shown for comparison, never picked.'] : []),
+                            ...(i.role === 'over' ? ['Just over your budget: shown for comparison, never picked.'] : []),
                         ]}
                     >
                         {bandLabel(h, i.bandId)}
@@ -158,6 +162,7 @@ function ItemRow(props: ItemRowProps): JSX.Element {
                         lines={[
                             `${blendText(h.blend)} of the change PoB computes with this item instead of ${currentItemText(h)}.`,
                             `Set the blend in Settings. Items need at least +${h.minGainPct}% to be worth a look.`,
+                            'Scored at 20% quality: armour and weapons below it count as if you add the quality (not corrupted or mirrored ones).',
                         ]}
                     >
                         <strong class={tone(i.gainPct)}>{gainText(i.gainPct)}</strong> <span class="muted">overall</span>
@@ -198,6 +203,11 @@ function ItemRow(props: ItemRowProps): JSX.Element {
                     </button>
                 </span>
             </div>
+            {props.copies > 0 && (
+                <p class="muted small copies">
+                    {props.copies} more like this{props.fromChaos === null ? '' : `, from ${compact(props.fromChaos)}c`}
+                </p>
+            )}
             {msg !== null && msg.itemId === i.id && <p class="muted small">{msg.text}</p>}
             {props.open && <ItemDetail item={i} header={h} />}
         </li>
@@ -223,6 +233,8 @@ export function ItemList(props: {
     readonly hint?: boolean;
 }): JSX.Element {
     const [openId, setOpenId] = useState<string | null>(null);
+    // Identical copies show as one row (the cheapest, or the tagged one), so 20 of one roll read as one find.
+    const rows: FoldedItem[] = foldCopies(props.items, new Set<string>(props.tags?.keys() ?? []));
     if (props.items.length === 0) {
         return <p class="muted">{props.empty}</p>;
     }
@@ -232,11 +244,13 @@ export function ItemList(props: {
                 <p class="muted small list-hint">Click a find (or Compare) for what it changes against your current item, side by side.</p>
             )}
             <ul class="finds">
-                {props.items.map((i: UiItem) => (
+                {rows.map(({ item: i, copies, fromChaos }: FoldedItem) => (
                     <ItemRow
                         key={i.id}
                         header={props.header}
                         item={i}
+                        copies={copies}
+                        fromChaos={fromChaos}
                         tag={props.tags?.get(i.id)}
                         tipScope={props.scope}
                         open={openId === i.id}

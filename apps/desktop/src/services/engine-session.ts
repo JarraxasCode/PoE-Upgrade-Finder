@@ -6,8 +6,16 @@
 import { createHash } from 'node:crypto';
 import { readFileSync, statSync } from 'node:fs';
 import { basename } from 'node:path';
-import { EngineClient } from '@poe-upgrade-finder/engine-client';
-import type { EngineCommand, LoadBuildData, ResolvedTarget, StatBlock, StatsData, WithWarnings } from '@poe-upgrade-finder/engine-client';
+import { EngineClient, EngineError } from '@poe-upgrade-finder/engine-client';
+import type {
+    EngineCommand,
+    EngineWarning,
+    LoadBuildData,
+    ResolvedTarget,
+    StatBlock,
+    StatsData,
+    WithWarnings,
+} from '@poe-upgrade-finder/engine-client';
 import type { BuildState, BuildSummary, EquippedInfo } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { buildSummary, targetRequest } from './build-summary.ts';
@@ -77,9 +85,23 @@ export class EngineSession {
         return this.current;
     }
 
-    /** Runs a sequence of engine commands alone (nothing else uses the worker meanwhile). */
+    /**
+     * Runs a sequence of engine commands alone (nothing else uses the worker meanwhile). When the engine says it
+     * doesn't hold the build (no-build, stale-build), the loaded build is forgotten, so the next ensure() loads
+     * it again rather than returning it as loaded (issue #42).
+     */
     public exclusive<T>(task: (client: EngineClient) => Promise<T>): Promise<T> {
-        const run: Promise<T> = this.lock.then(async () => task(this.ensureClient()));
+        const run: Promise<T> = this.lock.then(async () => {
+            try {
+                return await task(this.ensureClient());
+            } catch (error: unknown) {
+                if (error instanceof EngineError && (error.code === 'no-build' || error.code === 'stale-build')) {
+                    this.options.logger.log('warn', 'the engine lost the build: it loads again on next use', { error: error.message });
+                    this.current = undefined;
+                }
+                throw error;
+            }
+        });
         this.lock = run.catch(() => undefined);
         return run;
     }
@@ -241,7 +263,14 @@ export class EngineSession {
         return this.client;
     }
 
-    private async load(client: EngineClient, buildId: string, file: string, targetId: string): Promise<LoadedBuild> {
+    /**
+     * Loads the save, then reads the stats for the target. A target the build can't use (PoB's bad-target: Full
+     * DPS with no group in Full DPS, a skill group that's gone) falls back to "As saved" with a warning, so the
+     * build still loads and the target picker stays usable (issue #62). The loaded build's targetId is then
+     * "saved", which is what the Search view shows and a run asks for.
+     */
+    private async load(client: EngineClient, buildId: string, file: string, requestedTargetId: string): Promise<LoadedBuild> {
+        let targetId: string = requestedTargetId;
         const save: SaveFile = readSave(file);
         const fileModifiedMs: number = save.modifiedMs;
         const xml: string = save.xml;
@@ -249,12 +278,33 @@ export class EngineSession {
         const load: WithWarnings<LoadBuildData> = await client.loadBuild(xml, basename(file));
         let target: ResolvedTarget = load.target;
         let stats: StatBlock = load.baseline;
-        let warnings = load.warnings;
+        let warnings: readonly EngineWarning[] = load.warnings;
         if (targetId !== 'saved') {
-            const s: WithWarnings<StatsData> = await client.stats({ target: targetRequest(targetId) });
-            target = s.target;
-            stats = s.stats;
-            warnings = [...warnings, ...s.warnings];
+            try {
+                const s: WithWarnings<StatsData> = await client.stats({ target: targetRequest(targetId) });
+                target = s.target;
+                stats = s.stats;
+                warnings = [...warnings, ...s.warnings];
+            } catch (error: unknown) {
+                if (!(error instanceof EngineError) || error.code !== 'bad-target') {
+                    throw error;
+                }
+                this.options.logger.log('warn', 'remembered damage target not usable: loaded as saved', {
+                    buildId: buildId,
+                    target: targetId,
+                    error: error.message,
+                });
+                warnings = [
+                    ...warnings,
+                    {
+                        code: 'target-fallback',
+                        message:
+                            `The remembered damage target can't be used (PoB: ${error.message}), so damage is measured as saved. ` +
+                            'Tick "Include in Full DPS" on a skill group in PoB, or pick a skill under "Measure damage on".',
+                    },
+                ];
+                targetId = 'saved';
+            }
         }
         this.options.logger.log('info', 'build loaded', {
             buildId: buildId,

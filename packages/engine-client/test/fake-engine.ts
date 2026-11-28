@@ -2,11 +2,13 @@
 // data. Mode (argv[2]): normal | fatal | silent | bad-json. In score, the item text "CRASH" makes it exit,
 // "HANG" makes it stop answering, "BAD" makes it fail the item, and "SCORE-THEN-CRASH" scores the item,
 // then exits before the batch's final reply.
+import { existsSync, unlinkSync } from 'node:fs';
 import { createInterface } from 'node:readline';
 import { isRecord } from '../src/check.ts';
 import type { JsonRecord } from '../src/check.ts';
 
 const mode: string = process.argv[2] ?? 'normal';
+const failLoadFile: string | undefined = process.env['FAKE_FAIL_LOAD_FILE'];
 const buildIdPrefix: string = `b${process.pid}-`;
 let loads: number = 0;
 let buildId: string | undefined;
@@ -50,6 +52,13 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
             reply({ pobVersion: 'fake', gcEvery: 100, scoresSinceGc: 0, gcRuns: 0, luaHeapMb: 1 });
             return;
         case 'loadBuild':
+            // FAKE_FAIL_LOAD_FILE: while that file exists, one load fails and removes it (a reload that fails once).
+            if (failLoadFile !== undefined && existsSync(failLoadFile)) {
+                unlinkSync(failLoadFile);
+                buildId = undefined;
+                fail('load-failed', 'reload failed once');
+                return;
+            }
             if (req['xml'] === 'BROKEN') {
                 buildId = undefined;
                 fail('load-failed', 'trying to close <Build>');
@@ -107,6 +116,7 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
                         stats: block(100 + i),
                         unparsed: [],
                         validForSlot: true,
+                        offHandRemoved: false,
                     },
                 });
                 if (items[i] === 'SCORE-THEN-CRASH') {
@@ -114,7 +124,7 @@ createInterface({ input: process.stdin }).on('line', (line: string) => {
                     return;
                 }
             }
-            reply({ count: items.length, failed: 0, gcRuns: 0, seconds: 0 });
+            reply({ count: items.length, failed: 0, gcRuns: 0, seconds: 0, offHandRemoved: 0 });
             return;
         }
         case 'shutdown':

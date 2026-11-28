@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { after, test } from 'node:test';
 import type { PobUpdateState } from '@poe-upgrade-finder/ipc';
+import { POB_HOOKS } from '@poe-upgrade-finder/pob-update';
 import type { FetchedFile, PobSource } from '@poe-upgrade-finder/pob-update';
 import { manifestVersion, PobUpdates, readCurrent } from '../src/services/pob-updates.ts';
 
@@ -16,17 +17,14 @@ after(() => {
     }
 });
 
-/** A PoB copy's files: the engine's hooks, the licence and one data file whose text marks the version. */
+/** A PoB copy's files: each file the engine's hooks name, holding its needles; the licence; Data.lua's text marks the version. */
 function files(version: string): Record<string, string> {
-    return {
-        'LICENSE.md': 'MIT\n',
-        'src/HeadlessWrapper.lua': 'loadBuildFromXML\n',
-        'src/_SimpleGraphic.def.lua': 'stubs\n',
-        'src/Classes/CalcsTab.lua': 'GetMiscCalculator\n',
-        'src/Classes/ItemsTab.lua': 'repSlotName\n',
-        'src/Classes/TradeQueryGenerator.lua': 'StartQuery\n',
-        'src/Modules/Data.lua': `powerStatList -- ${version}\n`,
-    };
+    const out: Record<string, string> = { 'LICENSE.md': 'MIT\n' };
+    for (const hook of POB_HOOKS) {
+        out[hook.file] = `${out[hook.file] ?? ''}${hook.needle}\n`;
+    }
+    out['src/Modules/Data.lua'] = `${out['src/Modules/Data.lua'] ?? ''}-- ${version}\n`;
+    return out;
 }
 
 function manifest(version: string): string {
@@ -36,7 +34,12 @@ function manifest(version: string): string {
         if (path === 'src/HeadlessWrapper.lua' || path === 'src/_SimpleGraphic.def.lua') {
             continue;
         }
-        const [part, name] = path === 'LICENSE.md' ? ['default', path] : ['program', path.slice(4)];
+        const [part, name] =
+            path === 'LICENSE.md'
+                ? ['default', path]
+                : path.startsWith('runtime/')
+                  ? ['runtime', path.slice('runtime/'.length)]
+                  : ['program', path.slice('src/'.length)];
         lines.push(`<File name="${name}" part="${part}" sha1="${crlf(text)}" />`);
     }
     return `<PoBVersion><Version number="${version}" />\n${lines.join('\n')}\n</PoBVersion>\n`;

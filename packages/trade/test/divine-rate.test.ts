@@ -6,6 +6,7 @@ import { test } from 'node:test';
 import { DivineRateClient, isOutOfDate, lastFinishedHour, manualRate, readDigest } from '../src/divine-rate.ts';
 import type { DivineRate, RateLookup } from '../src/divine-rate.ts';
 import type { HttpOutcome, HttpRequest, HttpTransport } from '../src/http.ts';
+import type { LogLevel, TradeLogger } from '../src/trade-client.ts';
 import { silent } from './log.ts';
 import { FakeClock } from './helpers.ts';
 
@@ -185,3 +186,231 @@ test(
         assert.ok(hc.kind === 'rate' && Math.round(hc.chaosPerDivine * 10) / 10 === 130.4);
     },
 );
+
+// ---- Issue #83: stepping back, the time cap, Cancel, sharing, the cooldown, log levels ------------------
+
+interface Logged {
+    readonly level: LogLevel;
+    readonly message: string;
+}
+
+class RecordingLogger implements TradeLogger {
+    public readonly lines: Logged[] = [];
+
+    public log(level: LogLevel, message: string): void {
+        this.lines.push({ level: level, message: message });
+    }
+}
+
+/** Answers each hour with a scripted outcome; any hour not in the script is GGG's 404. Can cost clock time. */
+class OutcomeTransport implements HttpTransport {
+    public readonly asked: number[] = [];
+    public readonly timeouts: number[] = [];
+    private readonly byHour: ReadonlyMap<number, HttpOutcome>;
+    private readonly clock: FakeClock | undefined;
+    private readonly costMs: number;
+
+    public constructor(byHour: ReadonlyMap<number, HttpOutcome>, clock?: FakeClock, costMs: number = 0) {
+        this.byHour = byHour;
+        this.clock = clock;
+        this.costMs = costMs;
+    }
+
+    public send(request: HttpRequest): Promise<HttpOutcome> {
+        const hour: number = Number(request.url.split('/').pop());
+        this.asked.push(hour);
+        this.timeouts.push(request.timeoutMs);
+        if (this.clock !== undefined) {
+            this.clock.t += this.costMs;
+        }
+        const outcome: HttpOutcome = this.byHour.get(hour) ?? { kind: 'response', status: 404, headers: {}, text: '{"markets":[]}' };
+        return Promise.resolve(outcome);
+    }
+}
+
+/** Holds every request until release() or its signal aborts (then 'aborted', like nodeFetchTransport). */
+class HeldTransport implements HttpTransport {
+    public readonly asked: number[] = [];
+    public readonly signals: (AbortSignal | undefined)[] = [];
+    private readonly pending: ((outcome: HttpOutcome) => void)[] = [];
+
+    public send(request: HttpRequest): Promise<HttpOutcome> {
+        this.asked.push(Number(request.url.split('/').pop()));
+        this.signals.push(request.signal);
+        return new Promise<HttpOutcome>((resolve: (outcome: HttpOutcome) => void) => {
+            this.pending.push(resolve);
+            request.signal?.addEventListener('abort', () => resolve({ kind: 'aborted' }), { once: true });
+        });
+    }
+
+    public release(outcome: HttpOutcome): void {
+        const next: ((outcome: HttpOutcome) => void) | undefined = this.pending.shift();
+        assert.ok(next, 'a request is waiting');
+        next(outcome);
+    }
+}
+
+/** Lets the client's async steps (limiter, transport) run. */
+async function settle(): Promise<void> {
+    for (let i: number = 0; i < 20; i++) {
+        await Promise.resolve();
+    }
+}
+
+function digestOutcome(chaos: number, divine: number): HttpOutcome {
+    return { kind: 'response', status: 200, headers: {}, text: digest([market('Covens', `${CHAOS}|${DIVINE}`, chaos, divine)]) };
+}
+
+test('a timeout, a network error, a 5xx or a bad digest ends the lookup instead of stepping back an hour', async () => {
+    const failures: readonly HttpOutcome[] = [
+        { kind: 'timeout' },
+        { kind: 'network-error', message: 'ECONNRESET' },
+        { kind: 'response', status: 503, headers: {}, text: '' },
+        { kind: 'response', status: 200, headers: {}, text: 'not json' },
+    ];
+    for (const failure of failures) {
+        const clock: FakeClock = new FakeClock();
+        clock.t = (H11 + 3600 + 10 * 60) * 1000; // last finished hour: 11:00; 10:00 has a rate
+        const transport: OutcomeTransport = new OutcomeTransport(
+            new Map<number, HttpOutcome>([
+                [H11, failure],
+                [H10, digestOutcome(2000, 10)],
+            ]),
+        );
+        const lookup: RateLookup = await client(transport, clock).current('Covens');
+        assert.deepEqual(transport.asked, [H11], `${failure.kind}: no older hour asked`);
+        assert.equal(lookup.rate, undefined);
+        assert.equal(lookup.attempts.length, 1);
+    }
+});
+
+test('an hour with no market for the league is stepped back from, like a 404', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 3600 + 10 * 60) * 1000;
+    const transport: OutcomeTransport = new OutcomeTransport(
+        new Map<number, HttpOutcome>([
+            [H11, { kind: 'response', status: 200, headers: {}, text: digest([market('Standard', `${CHAOS}|${DIVINE}`, 1, 1)]) }],
+            [H10, digestOutcome(2000, 10)],
+        ]),
+    );
+    const lookup: RateLookup = await client(transport, clock).current('Covens');
+    assert.deepEqual(transport.asked, [H11, H10]);
+    assert.equal(lookup.rate?.chaosPerDivine, 200);
+});
+
+test('the whole lookup is capped in time: each request gets what is left, and none starts after it', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 10 * 60) * 1000;
+    const transport: OutcomeTransport = new OutcomeTransport(new Map<number, HttpOutcome>(), clock, 15_000); // slow 404s
+    const rates: DivineRateClient = new DivineRateClient({
+        transport: transport,
+        logger: silent,
+        appVersion: '0.1.0',
+        clock: clock,
+        timeoutMs: 20_000,
+        lookupTimeoutMs: 40_000,
+    });
+    const lookup: RateLookup = await rates.current('Covens');
+    assert.equal(lookup.rate, undefined);
+    assert.deepEqual(transport.timeouts, [20_000, 20_000, 10_000], 'three tries in 40 s, the last one cut short');
+});
+
+test('Cancel lets a run go at once and stops the request when nobody else waits for it', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 10 * 60) * 1000;
+    const transport: HeldTransport = new HeldTransport();
+    const rates: DivineRateClient = client(transport, clock);
+    const prep: AbortController = new AbortController();
+    const pending: Promise<RateLookup> = rates.current('Covens', prep.signal);
+    await settle();
+    assert.equal(transport.asked.length, 1);
+    prep.abort();
+    const lookup: RateLookup = await pending;
+    assert.equal(lookup.fetched, false);
+    assert.equal(lookup.rate, undefined);
+    assert.equal(transport.signals[0]?.aborted, true, 'the request itself was aborted');
+    await settle();
+    assert.equal(transport.asked.length, 1, 'an aborted lookup does not step back');
+});
+
+test('app start and run start share one lookup; one cancelling leaves the other waiting', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 10 * 60) * 1000;
+    const transport: HeldTransport = new HeldTransport();
+    const rates: DivineRateClient = client(transport, clock);
+    const atStart: Promise<RateLookup> = rates.current('Covens');
+    const prep: AbortController = new AbortController();
+    const atRun: Promise<RateLookup> = rates.current('Covens', prep.signal);
+    await settle();
+    assert.deepEqual(transport.asked, [H10], 'one request for both');
+    prep.abort();
+    assert.equal((await atRun).fetched, false);
+    assert.equal(transport.signals[0]?.aborted, false, 'app start still waits for it');
+    transport.release(digestOutcome(2080, 10));
+    const lookup: RateLookup = await atStart;
+    assert.equal(lookup.rate?.chaosPerDivine, 208);
+    assert.equal(transport.asked.length, 1);
+
+    // Done: the next out-of-date lookup starts afresh.
+    clock.t += 3600 * 1000;
+    const next: Promise<RateLookup> = rates.current('Covens');
+    await settle();
+    assert.equal(transport.asked.length, 2);
+    transport.release({ kind: 'response', status: 404, headers: {}, text: '' });
+    assert.equal((await next).rate?.chaosPerDivine, 208);
+});
+
+test('a rate typed in while GGG is looked up is kept', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 10 * 60) * 1000;
+    const transport: HeldTransport = new HeldTransport();
+    const rates: DivineRateClient = client(transport, clock);
+    const pending: Promise<RateLookup> = rates.current('Covens');
+    await settle();
+    rates.setManual('Covens', 150);
+    transport.release(digestOutcome(2080, 10));
+    assert.equal((await pending).rate?.source, 'manual');
+    assert.equal((await rates.current('Covens')).rate?.chaosPerDivine, 150);
+});
+
+test('pressing Refresh during the cooldown does not extend it', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 10 * 60) * 1000;
+    const transport: DigestTransport = new DigestTransport(new Map<number, string>());
+    const rates: DivineRateClient = client(transport, clock);
+    const first: number = clock.t;
+    assert.equal(rates.refreshBlockedUntil(), undefined);
+    await rates.refresh('Covens');
+    assert.equal(rates.refreshBlockedUntil(), first + 30_000);
+    clock.t = first + 20_000;
+    assert.equal(rates.refreshBlocked(), true);
+    await rates.refresh('Covens'); // ignored
+    assert.equal(rates.refreshBlockedUntil(), first + 30_000, 'unchanged by the ignored press');
+    const asked: number = transport.asked.length;
+    clock.t = first + 31_000;
+    assert.equal(rates.refreshBlocked(), false);
+    await rates.refresh('Covens');
+    assert.ok(transport.asked.length > asked, '31 s after the first press, Refresh reaches GGG again');
+});
+
+test('the newest hour not published yet logs info; no rate at all logs a warning', async () => {
+    const clock: FakeClock = new FakeClock();
+    clock.t = (H11 + 3600 + 10 * 60) * 1000; // 12:10: 11:00 is due, 10:00 has a digest
+    const logger: RecordingLogger = new RecordingLogger();
+    const transport: DigestTransport = new DigestTransport(
+        new Map<number, string>([[H10, digest([market('Covens', `${CHAOS}|${DIVINE}`, 2000, 10)])]]),
+    );
+    const rates: DivineRateClient = new DivineRateClient({ transport: transport, logger: logger, appVersion: '0.1.0', clock: clock });
+    await rates.current('Covens'); // 11:00 404, 10:00 found
+    logger.lines.length = 0;
+    await rates.current('Covens'); // 11:00 still 404: the normal case
+    assert.deepEqual(
+        logger.lines.filter((l: Logged) => l.level === 'warn' || l.level === 'error'),
+        [],
+    );
+    assert.ok(logger.lines.some((l: Logged) => l.level === 'info' && l.message === 'no newer divine rate from GGG yet'));
+
+    logger.lines.length = 0;
+    await rates.current('Hardcore Covens'); // nothing for this league at all
+    assert.ok(logger.lines.some((l: Logged) => l.level === 'warn' && l.message === 'no divine rate from GGG'));
+});

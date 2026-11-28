@@ -3,9 +3,10 @@
 //
 //   node tools/fixtures/make-fixtures.ts build <in.xml> <out.xml>
 //       a PoB save with the account hash, character hash and share link taken off its <Import> line
-//   node tools/fixtures/make-fixtures.ts trade <in-raw.json> <out.json>
+//   node tools/fixtures/make-fixtures.ts trade <in-raw.json> <out.json> [--name <unique>]
 //       a spike trade recording with every seller's account and character name replaced (seller1#0000,
-//       Character1, ... consistently) and any whisper or hideout token dropped
+//       Character1, ... consistently) and any whisper or hideout token dropped. A newer spike's `fetches`
+//       list (V29) becomes the `fetch` list --replay reads; --name keeps only that unique's listings.
 //   node tools/fixtures/make-fixtures.ts digest <in.json> <out.json> <league>...
 //       a GGG Currency Exchange digest cut down to the named leagues' markets
 
@@ -98,9 +99,41 @@ function replaceEverywhere(value: unknown, pairs: readonly [string, string][]): 
     return value;
 }
 
-function trade(text: string): string {
+/** The recording in the shape --replay reads (`fetch`), with only the named item's listings when one is given. */
+function replayShape(raw: unknown, name: string | undefined): unknown {
+    if (!isRecord(raw)) {
+        throw new Error('not a trade recording');
+    }
+    const calls: unknown = raw['fetch'] ?? raw['fetches'];
+    if (!Array.isArray(calls)) {
+        throw new Error('the recording has no fetch list');
+    }
+    const keep = (entry: unknown): boolean => {
+        if (name === undefined) {
+            return true;
+        }
+        const item: unknown = isRecord(entry) ? entry['item'] : undefined;
+        return isRecord(item) && item['name'] === name;
+    };
+    const fetch: unknown[] = [];
+    for (const call of calls) {
+        if (!isRecord(call) || !isRecord(call['json']) || !Array.isArray(call['json']['result'])) {
+            continue;
+        }
+        const result: unknown[] = call['json']['result'].filter(keep);
+        if (result.length === 0) {
+            continue;
+        }
+        const ids: unknown[] = result.map((e: unknown) => (isRecord(e) ? e['id'] : undefined));
+        fetch.push({ ...call, ids: ids, json: { ...call['json'], result: result } });
+    }
+    const { fetches: _fetches, ...rest } = raw;
+    return { ...rest, fetch: fetch };
+}
+
+function trade(text: string, name: string | undefined): string {
     const names: Renamer = new Renamer();
-    const renamed: unknown = renameSellers(JSON.parse(text), names);
+    const renamed: unknown = renameSellers(replayShape(JSON.parse(text), name), names);
     // Names can also turn up in notes or labels: replace them wherever they are.
     const clean: unknown = replaceEverywhere(renamed, names.originals());
     const left: string = JSON.stringify(clean);
@@ -126,14 +159,15 @@ function digest(text: string, leagues: readonly string[]): string {
 function main(args: readonly string[]): number {
     const [kind, input, output, ...rest] = args;
     if (kind === undefined || input === undefined || output === undefined) {
-        process.stderr.write('usage: make-fixtures.ts build|trade|digest <in> <out> [league...]\n');
+        process.stderr.write('usage: make-fixtures.ts build|trade|digest <in> <out> [league... | --name <unique>]\n');
         return 2;
     }
     const text: string = readFileSync(input, 'utf8');
     if (kind === 'build') {
         writeFileSync(output, build(text));
     } else if (kind === 'trade') {
-        writeFileSync(output, trade(text));
+        const at: number = rest.indexOf('--name');
+        writeFileSync(output, trade(text, at === -1 ? undefined : rest[at + 1]));
     } else if (kind === 'digest') {
         if (rest.length === 0) {
             throw new Error('name at least one league to keep');

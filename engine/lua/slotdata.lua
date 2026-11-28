@@ -17,6 +17,12 @@ local json = engineRequire("json")
 
 local slotdata = {}
 
+-- The site's `type` for a base: PoB's name without its bracketed variant (V24), e.g. "Two-Toned Boots
+-- (Armour/Evasion)" is "Two-Toned Boots".
+function slotdata.tradeType(name)
+	return (name:gsub("%s*%b()$", ""))
+end
+
 local AFFIX_CATEGORY = { Prefix = "explicit", Suffix = "explicit", Exarch = "implicit", Eater = "implicit", Corrupted = "implicit" }
 local SKIP_TYPES = { Flask = true, Tincture = true, Jewel = true, Graft = true, Viscera = true, ["Fishing Rod"] = true }
 local INFLUENCES = { "shaper", "elder", "adjudicator", "basilisk", "crusader", "eyrie" }
@@ -27,6 +33,18 @@ local DEFENCE_FIELDS = { armour = "Armour", evasion = "Evasion", energyShield = 
 local SOURCE_CATEGORY = { crafted = "crafted", veiled = "veiled", delve = "delve" }
 local delveDropOnly = require("Data.DelveDropOnly")
 local incursionDropOnly = require("Data.IncursionDropOnly")
+
+-- A PoB data table the slot data reads. One PoB renamed or dropped is an error naming it (issue #66), never an
+-- empty table: `or {}` here would quietly empty a mod source (the bench, essences, ...) after a PoB update. An
+-- error, not a warning, because the client caches slot data per PoB version and logs only a warning count: a
+-- short result would stick. The error reaches the user ("Couldn't read PoB's mods for ..."), and the PoB
+-- update's smoke check stops such a copy before it goes live.
+local function pobTable(value, name)
+	if type(value) ~= "table" then
+		error({ code = "pob-data", message = "PoB has no " .. name .. " table (renamed or dropped in this PoB version?)" }, 0)
+	end
+	return value
+end
 
 -- The site's stat list, loaded once: id -> text, and "<category>|<text with #>" -> id.
 local site = nil
@@ -242,7 +260,7 @@ end
 -- Every base type with bases (types the editor never shows are left out).
 function slotdata.baseTypes()
 	local counts = {}
-	for _, base in pairs(data.itemBases) do
+	for _, base in pairs(pobTable(data.itemBases, "data.itemBases")) do
 		if not SKIP_TYPES[base.type] and not base.hidden then
 			counts[base.type] = (counts[base.type] or 0) + 1
 		end
@@ -260,7 +278,7 @@ end
 function slotdata.build(baseType)
 	local started = os.clock()
 	local names = {}
-	for name, base in pairs(data.itemBases) do
+	for name, base in pairs(pobTable(data.itemBases, "data.itemBases")) do
 		if base.type == baseType and not base.hidden then
 			table.insert(names, name)
 		end
@@ -269,6 +287,15 @@ function slotdata.build(baseType)
 		return nil
 	end
 	table.sort(names)
+	local itemMods = pobTable(data.itemMods, "data.itemMods")
+	local implicitMods = pobTable(itemMods.ItemExclusive, "data.itemMods.ItemExclusive")
+	local delveMods = pobTable(itemMods.Delve, "data.itemMods.Delve")
+	local explicitMods = pobTable(itemMods.Explicit, "data.itemMods.Explicit")
+	local masterMods = pobTable(data.masterMods, "data.masterMods")
+	local essences = pobTable(data.essences, "data.essences")
+	local veiledMods = pobTable(data.veiledMods, "data.veiledMods")
+	local beastCraft = pobTable(data.beastCraft, "data.beastCraft")
+	local necropolisMods = pobTable(data.necropolisMods, "data.necropolisMods")
 
 	local mods = {}        -- modId -> mod entry
 	local familyIndex = {} -- key -> 0-based index into families
@@ -339,7 +366,7 @@ function slotdata.build(baseType)
 		table.sort(tags)
 		local implicits = json.array()
 		for _, implicitId in ipairs(base.implicitIds or {}) do
-			local mod = data.itemMods.ItemExclusive and data.itemMods.ItemExclusive[implicitId]
+			local mod = implicitMods[implicitId]
 			if mod then
 				local ids = {}
 				for _, hash in ipairs(sortedHashes(mod)) do
@@ -356,7 +383,7 @@ function slotdata.build(baseType)
 			if influence then
 				item[influence] = true
 			end
-			for modId, mod in pairs(item.affixes or {}) do
+			for modId, mod in pairs(pobTable(item.affixes, "item.affixes (" .. name .. ")")) do
 				local source = item:CheckIfModIsDelve(mod) and "fossil" or "natural"
 				if AFFIX_CATEGORY[mod.type] and item:GetModSpawnWeight(mod) > 0 and addMod(modId, mod, source) then
 					table.insert(ids, modId)
@@ -376,29 +403,29 @@ function slotdata.build(baseType)
 				table.insert(plain, source .. ":" .. modId)
 			end
 		end
-		for i, craft in ipairs(data.masterMods or {}) do
+		for i, craft in ipairs(masterMods) do
 			if craft.types and craft.types[item.type] then
 				addSource("crafted", tostring(i), craft)
 			end
 		end
-		for _, essence in pairs(data.essences or {}) do
+		for _, essence in pairs(essences) do
 			local modId = essence.mods and essence.mods[item.type]
-			local mod = modId and item.affixes and item.affixes[modId]
+			local mod = modId and item.affixes[modId]
 			-- An essence mod that also rolls naturally is already listed as natural.
 			if mod and item:GetModSpawnWeight(mod) <= 0 then
 				addSource("essence", modId, mod)
 			end
 		end
-		for modId, mod in pairs(data.veiledMods or {}) do
+		for modId, mod in pairs(veiledMods) do
 			if item:GetModSpawnWeight(mod) > 0 then
 				addSource("veiled", modId, mod)
 			end
 		end
-		for modId, mod in pairs(data.beastCraft or {}) do
+		for modId, mod in pairs(beastCraft) do
 			addSource("beast", modId, mod)
 		end
 		if baseType == "Helmet" or baseType == "Body Armour" or baseType == "Gloves" or baseType == "Boots" then
-			for modId, mod in pairs(data.necropolisMods or {}) do
+			for modId, mod in pairs(necropolisMods) do
 				if item:GetNecropolisModSpawnWeight(mod) > 0 then
 					addSource("necropolis", modId, mod)
 				end
@@ -409,14 +436,14 @@ function slotdata.build(baseType)
 			for modId, entry in pairs(categories) do
 				for _, cat in ipairs(entry.categories or {}) do
 					if cat == base.type or cat == subTypeName then
-						addSource(source, modId, modDb and modDb[modId])
+						addSource(source, modId, modDb[modId])
 						break
 					end
 				end
 			end
 		end
-		dropRestricted("delve", delveDropOnly, data.itemMods.Delve)
-		dropRestricted("incursion", incursionDropOnly, data.itemMods.Explicit)
+		dropRestricted("delve", delveDropOnly, delveMods)
+		dropRestricted("incursion", incursionDropOnly, explicitMods)
 		table.sort(plain)
 		local plainSet = {}
 		for _, id in ipairs(plain) do
@@ -446,8 +473,7 @@ function slotdata.build(baseType)
 		table.insert(bases, {
 			name = name,
 			defences = defences,
-			-- The site's `type` for this base: PoB's name without its bracketed variant (V24).
-			tradeType = (name:gsub("%s*%b()$", "")),
+			tradeType = slotdata.tradeType(name),
 			subType = base.subType,
 			level = base.req and base.req.level or 0,
 			tags = tags,

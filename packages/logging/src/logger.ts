@@ -2,7 +2,8 @@
 //
 //  - logs/app-YYYY-MM-DD.jsonl: everything, one file per (local) day;
 //  - logs/runs/<run id>.jsonl: the same lines for one run only;
-//  - kept 14 days or 200 MB, whichever comes first, oldest files deleted first;
+//  - kept 14 days or 200 MB, whichever comes first, oldest files deleted first: pruned at start-up and then
+//    hourly, so an app left open for days still prunes;
 //  - one JSON object per line: t (ms), level, area, runId, reqId, msg, data;
 //  - debug lines only with the Debug toggle on.
 //
@@ -39,9 +40,12 @@ export interface JsonlLoggerOptions {
     readonly now?: () => number;
     /** Also hand every line to this (e.g. the CLI's console). */
     readonly echo?: (line: LogLine) => void;
+    /** How often a write also prunes (default an hour). */
+    readonly pruneEveryMs?: number;
 }
 
 const DAY_MS: number = 24 * 3600 * 1000;
+const PRUNE_EVERY_MS: number = 3600 * 1000;
 const REDACTED: string = '[redacted]';
 const SECRET_KEY: RegExp = /cookie|authori[sz]ation|password|passwd|poesessid|poetoken|session[-_]?id|token|secret|credential/i;
 const SECRET_VALUE: RegExp = /(POESESSID|POETOKEN|cf_clearance)=[^;,\s]+/gi;
@@ -67,6 +71,9 @@ export function redact(value: unknown, depth: number = 0): unknown {
     if (typeof value === 'number' && !Number.isFinite(value)) {
         return String(value); // JSON has no Infinity or NaN
     }
+    if (typeof value === 'bigint') {
+        return String(value); // JSON.stringify throws on a BigInt
+    }
     return value;
 }
 
@@ -91,6 +98,8 @@ export class JsonlLogger {
     private readonly maxBytes: number;
     private readonly now: () => number;
     private readonly echo: ((line: LogLine) => void) | undefined;
+    private readonly pruneEveryMs: number;
+    private lastPruneAt: number = 0;
     private debugOn: boolean;
     private currentRun: string | undefined;
 
@@ -101,6 +110,7 @@ export class JsonlLogger {
         this.maxBytes = options.maxBytes ?? 200 * 1024 * 1024;
         this.now = options.now ?? Date.now;
         this.echo = options.echo;
+        this.pruneEveryMs = options.pruneEveryMs ?? PRUNE_EVERY_MS;
         this.debugOn = options.debug ?? false;
         mkdirSync(this.runsDir, { recursive: true });
         this.prune();
@@ -141,20 +151,33 @@ export class JsonlLogger {
             return;
         }
         const t: number = this.now();
-        // A request id (trade) or command id (engine) in the data is lifted to the line's own reqId.
-        const reqId: unknown = data?.['reqId'] ?? data?.['cmdId'];
-        const line: LogLine = {
-            t: t,
-            level: level,
-            area: area,
-            ...(this.currentRun === undefined ? {} : { runId: this.currentRun }),
-            ...(typeof reqId === 'number' || typeof reqId === 'string' ? { reqId: reqId } : {}),
-            msg: String(redact(message)),
-            ...(data === undefined ? {} : { data: redact(data) }),
-        };
-        const text: string = `${JSON.stringify(line)}\n`;
-        // A log write never fails the caller's trade or engine call (a file briefly locked by antivirus, a
-        // full disk): the line is dropped from that file, and still echoed.
+        if (t - this.lastPruneAt >= this.pruneEveryMs) {
+            this.prune();
+        }
+        // A log write never fails the caller's trade or engine call. Data that can't be written as JSON (a
+        // throwing getter or toJSON) is replaced by a note; a file briefly locked by antivirus or a full disk
+        // drops the line from that file, and it is still echoed.
+        const run: { runId?: string } = this.currentRun === undefined ? {} : { runId: this.currentRun };
+        const msg: string = String(redact(message));
+        let line: LogLine;
+        let text: string;
+        try {
+            // A request id (trade) or command id (engine) in the data is lifted to the line's own reqId.
+            const reqId: unknown = data?.['reqId'] ?? data?.['cmdId'];
+            line = {
+                t: t,
+                level: level,
+                area: area,
+                ...run,
+                ...(typeof reqId === 'number' || typeof reqId === 'string' ? { reqId: reqId } : {}),
+                msg: msg,
+                ...(data === undefined ? {} : { data: redact(data) }),
+            };
+            text = `${JSON.stringify(line)}\n`;
+        } catch {
+            line = { t: t, level: level, area: area, ...run, msg: msg, data: { logError: 'the data could not be written as JSON' } };
+            text = `${JSON.stringify(line)}\n`;
+        }
         this.append(join(this.dir, `app-${dayStamp(t)}.jsonl`), text);
         if (this.currentRun !== undefined) {
             this.append(join(this.runsDir, `${this.currentRun}.jsonl`), text);
@@ -170,11 +193,18 @@ export class JsonlLogger {
         }
     }
 
-    /** Deletes log files older than maxDays, then the oldest until the total is under maxBytes. */
+    /** Deletes log files older than maxDays, then the oldest until the total is under maxBytes. Never throws. */
     public prune(): void {
+        this.lastPruneAt = this.now();
         const files: { path: string; mtime: number; size: number }[] = [];
         for (const folder of [this.dir, this.runsDir]) {
-            for (const name of readdirSync(folder)) {
+            let names: readonly string[];
+            try {
+                names = readdirSync(folder);
+            } catch {
+                continue; // the folder is gone or locked: pruning is best effort
+            }
+            for (const name of names) {
                 if (!name.endsWith('.jsonl')) {
                     continue;
                 }
@@ -196,7 +226,7 @@ export class JsonlLogger {
                     unlinkSync(f.path);
                     total -= f.size;
                 } catch {
-                    // Locked: try again on the next start.
+                    // Locked: tried again on the next prune.
                 }
             }
         }

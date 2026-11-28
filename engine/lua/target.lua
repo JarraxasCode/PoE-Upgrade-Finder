@@ -145,4 +145,40 @@ function target.describe(resolved)
 	return { kind = resolved.kind, saved = resolved.saved, group = resolved.group, activeSkill = resolved.activeSkill, part = resolved.part, name = resolved.name }
 end
 
+-- Why PoB disabled the target's skill, or for Full DPS each included skill PoB disabled, as
+-- "Ground Slam (Main Hand weapon is not usable with this skill)"; nil when none is. PoB sets
+-- activeSkill.disableReason while it builds the skills (CalcActiveSkill.lua: the wrong weapon, no shield,
+-- a mana reservation it needs) and shows the main skill's in its own sidebar (Build.lua:2114). The skills
+-- are the socket groups' displaySkillList, from the last full build of the build as loaded (#36).
+function target.disableReason(resolved)
+	local reasons, seen = {}, {}
+	local function add(activeSkill)
+		local reason = activeSkill and activeSkill.disableReason
+		if type(reason) == "string" and reason ~= "" then
+			local text = activeSkill.activeEffect.grantedEffect.name .. " (" .. reason .. ")"
+			if not seen[text] then
+				seen[text] = true
+				table.insert(reasons, text)
+			end
+		end
+	end
+	local groups = build.skillsTab.socketGroupList
+	if resolved.kind == "skill" then
+		local group = groups[resolved.group]
+		add(group and group.displaySkillList and group.displaySkillList[resolved.activeSkill])
+	else
+		for _, group in ipairs(groups) do
+			if group.includeInFullDPS and group.enabled ~= false then
+				for _, activeSkill in ipairs(group.displaySkillList or {}) do
+					add(activeSkill)
+				end
+			end
+		end
+	end
+	if #reasons == 0 then
+		return nil
+	end
+	return table.concat(reasons, "; ")
+end
+
 return target

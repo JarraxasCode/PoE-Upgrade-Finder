@@ -1,16 +1,16 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { SLOT_ITEM_TYPES as CORE_SLOT_ITEM_TYPES } from '@poe-upgrade-finder/core';
-import type { SlotPlan as CoreSlotPlan, WeightedStat } from '@poe-upgrade-finder/core';
-import { readSlotData, SLOT_INFLUENCES as ENGINE_INFLUENCES } from '@poe-upgrade-finder/engine-client';
+import type { WeightedStat } from '@poe-upgrade-finder/core';
+import { readSlotData } from '@poe-upgrade-finder/engine-client';
 import type { SlotData, WithWarnings } from '@poe-upgrade-finder/engine-client';
-import { readSlotEditorData, readSlotPlan, SLOT_INFLUENCES, SLOT_ITEM_TYPES } from '@poe-upgrade-finder/ipc';
-import type { ModOption, SlotEditorData, SlotPlan } from '@poe-upgrade-finder/ipc';
+import { readSlotEditorData, readSlotPlan } from '@poe-upgrade-finder/ipc';
+import type { ModOption, SlotEditorData } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { sampleSlotDataJson } from '../../../packages/engine-client/test/slotdata-sample.ts';
-import { planReview } from '../src/run/slot-pipeline.ts';
+import { planReview } from '../src/services/weights.ts';
 import { isGearPseudo, SlotDataService, slotEditorData, totalOptions } from '../src/services/slot-data.ts';
-import type { SlotDataCache } from '../src/services/slot-data.ts';
+import type { LeftOut, SlotDataCache } from '../src/services/slot-data.ts';
+import type { SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const quiet: Logger = {
     log(): void {
@@ -32,13 +32,8 @@ const PLAN: SlotPlan = {
     picks: [{ position: 'prefix', group: 'MovementVelocity', influence: 'none', rule: 'include', stats: [{ statId: MS, min: 20 }] }],
 };
 
-test("the ipc's plan mirrors core's: same influences, and a plan passes between them unchanged", () => {
-    assert.deepEqual(SLOT_INFLUENCES, ENGINE_INFLUENCES);
-    assert.deepEqual(SLOT_ITEM_TYPES, CORE_SLOT_ITEM_TYPES);
-    // Both directions compile only while the two shapes match.
-    const asCore: CoreSlotPlan = PLAN;
-    const asIpc: SlotPlan = asCore;
-    assert.deepEqual(readSlotPlan(asIpc, 'p'), PLAN);
+test('a plan passes the ipc check unchanged', () => {
+    assert.deepEqual(readSlotPlan(PLAN, 'p'), PLAN);
 });
 
 test('the editor data: bases with their influences and implicits, mods with rolls as the mod reads', () => {
@@ -80,6 +75,40 @@ test('the editor data: bases with their influences and implicits, mods with roll
     assert.equal(byText('#% increased Evasion Rating'), undefined);
     assert.ok(slotEditorData(sample(), 'Boots', null).mods.some((m) => m.text === '#% increased Evasion Rating'));
     assert.throws(() => slotEditorData(sample(), 'Boots', 'Iron Greaves'), /isn't a Boots base/);
+});
+
+test('the editor data: option stats and a mod the check refuses are left out, not the whole result (issue #64)', () => {
+    const json = sampleSlotDataJson();
+    // The sample's own JSON (slotdata-sample.ts), shaped as written there; readSlotData checks it below.
+    const families = json['families'] as { tradeIds: string[]; siteTexts: string[] }[];
+    const mods = json['mods'] as Record<string, { stats: { range: number[] }[] }>;
+    // The ES family gains an option stat (PoB's id|option, as the Conflux mods have), and AR1 a roll no item has.
+    const es = families[1];
+    const ar = mods['AR1']?.stats[0];
+    assert.ok(es && ar);
+    es.tradeIds.push('explicit.stat_1190121450|1');
+    es.siteTexts.push('You have Chilling Conflux for # seconds every # seconds');
+    ar.range = [-1e7, -1e7];
+    const left: LeftOut[] = [];
+    const data: SlotEditorData = slotEditorData(readSlotData(json), 'Boots', null, [], undefined, (l: readonly LeftOut[]) => {
+        left.push(...l);
+    });
+    assert.deepEqual(readSlotEditorData(JSON.parse(JSON.stringify(data)), 'd'), data);
+    assert.deepEqual(
+        data.mods.find((m) => m.group === 'LocalEnergyShieldPercent')?.stats.map((st) => st.statId),
+        ['explicit.stat_4015621042'],
+    );
+    assert.equal(
+        data.mods.some((m) => m.group === 'LocalAttributeRequirements'),
+        false,
+    );
+    assert.deepEqual(
+        left.map((l) => [l.mod, l.whole, l.statIds]),
+        [
+            ['#% increased Energy Shield', false, ['explicit.stat_1190121450|1']],
+            ['#% reduced Attribute Requirements', true, []],
+        ],
+    );
 });
 
 test('slot data: one engine call per item type, then the cache; a failure is not remembered', async () => {

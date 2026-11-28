@@ -1,21 +1,21 @@
 {
   "name": "@poe-upgrade-finder/desktop",
   "productName": "poe-upgrade-finder",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "The Electron app: main process, preload and the headless mode (npm run search). The renderer is apps/ui.",
-  "license": "UNLICENSED",
+  "description": "The Electron app: main process and preload. The renderer is apps/ui.",
+  "license": "MIT",
   "type": "module",
   "main": "src/main.ts",
   "dependencies": {
-    "@poe-upgrade-finder/cli": "0.1.0",
     "@poe-upgrade-finder/core": "0.1.0",
     "@poe-upgrade-finder/engine-client": "0.1.0",
     "@poe-upgrade-finder/ipc": "0.1.0",
     "@poe-upgrade-finder/logging": "0.1.0",
     "@poe-upgrade-finder/pob-update": "0.1.0",
     "@poe-upgrade-finder/trade": "0.1.0",
-    "@poe-upgrade-finder/validate": "0.1.0"
+    "@poe-upgrade-finder/validate": "0.1.0",
+    "@poe-upgrade-finder/vocab": "0.1.0"
   },
   "devDependencies": {
     "electron": "45.4.1"

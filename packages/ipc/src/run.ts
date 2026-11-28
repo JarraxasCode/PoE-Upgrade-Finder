@@ -4,10 +4,20 @@
 
 import { array, boolean, number, oneOf, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
-import type { GearSlot, ListingType, SearchDepth } from './contract.ts';
 import { readOptionalItemView } from './item-view.ts';
-import type { ItemView } from './item-view.ts';
-import type { SlotPlan } from './plan.ts';
+import { GEAR_SLOTS, JUNK_REASONS, PRUNE_REASONS, SKIP_REASONS } from '@poe-upgrade-finder/vocab';
+import type {
+    BandRole,
+    ExcludedModCount,
+    GearSlot,
+    ItemView,
+    JunkReason,
+    ListingType,
+    PruneReason,
+    SearchDepth,
+    SkipReason,
+    SlotPlan,
+} from '@poe-upgrade-finder/vocab';
 
 type Read<T> = (value: unknown, path: string) => T;
 
@@ -23,8 +33,6 @@ export interface RunRequest {
     readonly depth: SearchDepth;
     readonly listing: ListingType;
 }
-
-export type BandRole = 'main' | 'over';
 
 export interface UiBand {
     readonly id: string;
@@ -46,9 +54,6 @@ export interface UiPrice {
     readonly currency: string;
 }
 
-export type HiddenReason = 'floor' | 'no-gain' | 'low-gain' | 'duplicate' | 'dominated';
-export const HIDDEN_REASONS: readonly HiddenReason[] = ['floor', 'no-gain', 'low-gain', 'duplicate', 'dominated'];
-
 /** One stat that moves with the item equipped instead of the current one (PoB's build totals). */
 export interface StatChange {
     readonly label: string;
@@ -56,9 +61,9 @@ export interface StatChange {
     readonly unit: '' | '%';
 }
 
-/** include: the slot plan's; need: the build's hard need (from the strip); exclude; defence. */
-export type PlanCheckKind = 'include' | 'need' | 'exclude' | 'defence';
-export const PLAN_CHECK_KINDS: readonly PlanCheckKind[] = ['include', 'need', 'exclude', 'defence'];
+/** include: the slot plan's; need: the build's hard need (from the strip); exclude; defence; socket (#58). */
+export type PlanCheckKind = 'include' | 'need' | 'exclude' | 'defence' | 'socket';
+export const PLAN_CHECK_KINDS: readonly PlanCheckKind[] = ['include', 'need', 'exclude', 'defence', 'socket'];
 
 /** met: as the site should have it; missed: by the app's reading it doesn't; unknown: the lines aren't known. */
 export type PlanCheckStatus = 'met' | 'missed' | 'unknown';
@@ -91,6 +96,8 @@ export interface UiItem {
     /** At the run's divine rate; null for other currencies. */
     readonly chaos: number | null;
     readonly bandId: string;
+    /** In budget or slightly over, by its price (core's priceRole), whichever band fetched it. */
+    readonly role: BandRole;
     /** Percent; null when PoB's change has no percentage (from 0 or infinity). */
     readonly gainPct: number | null;
     readonly dpsPct: number | null;
@@ -111,7 +118,7 @@ export interface UiItem {
     readonly planChecks: readonly UiPlanCheck[];
     readonly hasBuyLink: boolean;
     /** Set in the summary (the junk filter runs at the end); null while live or when shown. */
-    readonly hidden: HiddenReason | null;
+    readonly hidden: JunkReason | null;
     readonly hiddenBy: string | null;
 }
 
@@ -127,32 +134,9 @@ export interface PrunedStat {
     readonly statId: string;
     readonly label: string;
     readonly weight: number;
-    /** core's PruneReason. */
-    readonly reason: PruneReasonUi;
+    readonly reason: PruneReason;
     readonly text: string;
 }
-
-export type PruneReasonUi =
-    | 'excluded'
-    | 'included'
-    | 'base-cannot-roll'
-    | 'same-group'
-    | 'prefixes-full'
-    | 'suffixes-full'
-    | 'affixes-full'
-    | 'no-room'
-    | 'defences';
-export const PRUNE_REASONS: readonly PruneReasonUi[] = [
-    'excluded',
-    'included',
-    'base-cannot-roll',
-    'same-group',
-    'prefixes-full',
-    'suffixes-full',
-    'affixes-full',
-    'no-room',
-    'defences',
-];
 
 /** The weight review list: PoB's weights before the user's edits. */
 export interface WeightPreview {
@@ -171,6 +155,54 @@ export interface WeightPreview {
     readonly cached: boolean;
 }
 
+/** One unique for the picker (#113): PoB's estimated change at a top roll, and its weights, named. */
+export interface UiUnique {
+    readonly name: string;
+    readonly base: string;
+    /** The site's base name (kept with the pick, for the search). */
+    readonly tradeType: string;
+    /** PoB's score at a top roll against the equipped item (the generator's score; above 0 is better). */
+    readonly change: number;
+    /** The same as a percentage of the equipped item's score: about the overall gain a top roll would give. */
+    readonly changePct: number;
+    /** Heaviest first; empty when no rolling line helps (the search then goes cheapest first). */
+    readonly weights: readonly SearchedStat[];
+}
+
+/** The uniques PoB knows for a slot's item type, best estimated change first. */
+export interface UniqueList {
+    readonly buildId: string;
+    readonly slot: GearSlot;
+    readonly target: string;
+    readonly itemType: string;
+    readonly cached: boolean;
+    readonly uniques: readonly UiUnique[];
+}
+
+function uiUnique(value: unknown, path: string): UiUnique {
+    const r: JsonRecord = record(value, path);
+    return {
+        name: string(r['name'], `${path}.name`),
+        base: string(r['base'], `${path}.base`),
+        tradeType: string(r['tradeType'], `${path}.tradeType`),
+        change: finite(r['change'], `${path}.change`),
+        changePct: finite(r['changePct'], `${path}.changePct`),
+        weights: array(r['weights'], `${path}.weights`, searchedStat),
+    };
+}
+
+export function readUniqueList(value: unknown, path: string): UniqueList {
+    const r: JsonRecord = record(value, path);
+    return {
+        buildId: string(r['buildId'], `${path}.buildId`),
+        slot: oneOf(r['slot'], `${path}.slot`, GEAR_SLOTS),
+        target: string(r['target'], `${path}.target`),
+        itemType: string(r['itemType'], `${path}.itemType`),
+        cached: boolean(r['cached'], `${path}.cached`),
+        uniques: array(r['uniques'], `${path}.uniques`, uiUnique),
+    };
+}
+
 /** The slot plan a run searched with, for the Run view's header (issue #6). */
 export interface UiRunPlan {
     /** PoB's item type; null: the equipped item's category. */
@@ -179,6 +211,7 @@ export interface UiRunPlan {
     readonly base: string | null;
     /** "+# total to Dexterity (≥ 30)". */
     readonly includes: readonly UiPlanRule[];
+    /** "+# to maximum Mana"; a hybrid exclude as the mod (#38): "+# to maximum Energy Shield / +# to maximum Mana (hybrid mod)". */
     readonly excludes: readonly string[];
     /** "Armour (≥ 500)". */
     readonly defences: readonly string[];
@@ -221,6 +254,12 @@ export interface RunHeader {
     readonly hardNeeds: readonly string[];
     /** The slot plan; null when the run had none (searched as v0.1). */
     readonly plan: UiRunPlan | null;
+    /** The unique searched for (#113); null: a rare search. */
+    readonly unique: string | null;
+    /** Hard needs the unique has no line for: only a corruption or an enchant can meet them. */
+    readonly uniqueNotes: readonly string[];
+    /** The socket filters searched with (#58), rare or unique: "Links ≥ 6". Empty: none. */
+    readonly sockets: readonly string[];
     /** The level requirement filter as searched: "Up to level 92 (your level)", "Up to level 70", "Any level". */
     readonly levelFilter: string;
     /** PoB's weights, heaviest first. */
@@ -245,6 +284,10 @@ export interface RunCountsUi {
     readonly scored: number;
     readonly failed: number;
     readonly skipped: number;
+    /** The skipped listings by reason (#39): not for the slot, unidentified, already fetched, unreadable, an excluded mod. */
+    readonly skippedBy: Readonly<Record<SkipReason, number>>;
+    /** The listings dropped for an excluded hybrid mod, per mod (#38). */
+    readonly excludedMods: readonly ExcludedModCount[];
     readonly missing: number;
 }
 
@@ -382,6 +425,7 @@ export function readUiItem(value: unknown, path: string): UiItem {
         price: nullable(price)(r['price'], `${path}.price`),
         chaos: optNumber(r['chaos'], `${path}.chaos`),
         bandId: string(r['bandId'], `${path}.bandId`),
+        role: oneOf(r['role'], `${path}.role`, ['main', 'over'] as const),
         gainPct: optNumber(r['gainPct'], `${path}.gainPct`),
         dpsPct: optNumber(r['dpsPct'], `${path}.dpsPct`),
         ehpPct: optNumber(r['ehpPct'], `${path}.ehpPct`),
@@ -396,12 +440,10 @@ export function readUiItem(value: unknown, path: string): UiItem {
         changes: r['changes'] === undefined ? [] : array(r['changes'], `${path}.changes`, statChange),
         planChecks: r['planChecks'] === undefined ? [] : array(r['planChecks'], `${path}.planChecks`, planCheck),
         hasBuyLink: boolean(r['hasBuyLink'], `${path}.hasBuyLink`),
-        hidden: nullable((v: unknown, p: string) => oneOf(v, p, HIDDEN_REASONS))(r['hidden'], `${path}.hidden`),
+        hidden: nullable((v: unknown, p: string) => oneOf(v, p, JUNK_REASONS))(r['hidden'], `${path}.hidden`),
         hiddenBy: optString(r['hiddenBy'], `${path}.hiddenBy`),
     };
 }
-
-const SLOTS = ['Helmet', 'Body Armour', 'Gloves', 'Boots', 'Amulet', 'Ring 1', 'Ring 2', 'Belt', 'Weapon 1', 'Weapon 2'] as const;
 
 function searchedStat(v: unknown, p: string): SearchedStat {
     const s: JsonRecord = record(v, p);
@@ -425,7 +467,7 @@ export function readWeightPreview(value: unknown, path: string): WeightPreview {
     const r: JsonRecord = record(value, path);
     return {
         buildId: string(r['buildId'], `${path}.buildId`),
-        slot: oneOf(r['slot'], `${path}.slot`, SLOTS),
+        slot: oneOf(r['slot'], `${path}.slot`, GEAR_SLOTS),
         target: string(r['target'], `${path}.target`),
         weights: array(r['weights'], `${path}.weights`, searchedStat),
         pruned: array(r['pruned'], `${path}.pruned`, prunedStat),
@@ -460,7 +502,7 @@ export function readRunHeader(value: unknown, path: string): RunHeader {
         runId: string(r['runId'], `${path}.runId`),
         buildId: string(r['buildId'], `${path}.buildId`),
         buildName: string(r['buildName'], `${path}.buildName`),
-        slot: oneOf(r['slot'], `${path}.slot`, SLOTS),
+        slot: oneOf(r['slot'], `${path}.slot`, GEAR_SLOTS),
         league: string(r['league'], `${path}.league`),
         budgetLabel: string(r['budgetLabel'], `${path}.budgetLabel`),
         budgetChaos: finite(r['budgetChaos'], `${path}.budgetChaos`),
@@ -479,6 +521,10 @@ export function readRunHeader(value: unknown, path: string): RunHeader {
         weightedStats: finite(r['weightedStats'], `${path}.weightedStats`),
         hardNeeds: strings(r['hardNeeds'], `${path}.hardNeeds`),
         plan: nullable(runPlan)(r['plan'], `${path}.plan`),
+        unique: optString(r['unique'], `${path}.unique`),
+        uniqueNotes: strings(r['uniqueNotes'], `${path}.uniqueNotes`),
+        // Runs saved before #58 have none.
+        sockets: r['sockets'] === undefined ? [] : strings(r['sockets'], `${path}.sockets`),
         levelFilter: string(r['levelFilter'], `${path}.levelFilter`),
         searchedFor: array(r['searchedFor'], `${path}.searchedFor`, searchedStat),
         bands: array(r['bands'], `${path}.bands`, band),
@@ -496,6 +542,20 @@ function feedEntry(value: unknown, path: string): FeedEntry {
     };
 }
 
+function skippedBy(value: unknown, path: string): Readonly<Record<SkipReason, number>> {
+    const r: JsonRecord = record(value, path);
+    const out: Record<SkipReason, number> = { 'not-for-slot': 0, unidentified: 0, 'already-fetched': 0, malformed: 0, 'excluded-mod': 0 };
+    for (const reason of SKIP_REASONS) {
+        out[reason] = finite(r[reason], `${path}.${reason}`);
+    }
+    return out;
+}
+
+function excludedMod(value: unknown, path: string): ExcludedModCount {
+    const r: JsonRecord = record(value, path);
+    return { name: string(r['name'], `${path}.name`), dropped: finite(r['dropped'], `${path}.dropped`) };
+}
+
 function counts(value: unknown, path: string): RunCountsUi {
     const r: JsonRecord = record(value, path);
     return {
@@ -504,6 +564,8 @@ function counts(value: unknown, path: string): RunCountsUi {
         scored: finite(r['scored'], `${path}.scored`),
         failed: finite(r['failed'], `${path}.failed`),
         skipped: finite(r['skipped'], `${path}.skipped`),
+        skippedBy: skippedBy(r['skippedBy'], `${path}.skippedBy`),
+        excludedMods: array(r['excludedMods'], `${path}.excludedMods`, excludedMod),
         missing: finite(r['missing'], `${path}.missing`),
     };
 }

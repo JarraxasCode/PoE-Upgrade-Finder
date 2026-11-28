@@ -2,8 +2,7 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { emptySlotPlan } from '@poe-upgrade-finder/ipc';
-import type { BaseOption, SlotEditorData, SlotPlan } from '@poe-upgrade-finder/ipc';
+import type { BaseOption, SlotEditorData } from '@poe-upgrade-finder/ipc';
 import {
     defenceKindsOf,
     defencesSummary,
@@ -13,9 +12,20 @@ import {
     withItemType,
     withoutPicks,
 } from '../src/slot-plan-model.ts';
+import { emptySlotPlan, PLAIN_AFFIXES } from '@poe-upgrade-finder/vocab';
+import type { SlotPlan } from '@poe-upgrade-finder/vocab';
 
 function base(name: string, defences: BaseOption['defences']): BaseOption {
-    return { name: name, tradeType: name, level: 60, defences: defences, implicits: [], influences: [], icon: null };
+    return {
+        name: name,
+        tradeType: name,
+        level: 60,
+        defences: defences,
+        implicits: [],
+        influences: [],
+        affixes: PLAIN_AFFIXES,
+        icon: null,
+    };
 }
 
 const BOOTS: SlotEditorData = {

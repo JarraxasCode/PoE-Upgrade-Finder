@@ -123,3 +123,45 @@ test('a failed write never throws into the caller', () => {
     });
     assert.equal(echoed.length, 1);
 });
+
+test('data that JSON cannot hold never throws into the caller: a BigInt is written as text, a throwing getter as a note', () => {
+    const dir: string = tempDir();
+    const logger: JsonlLogger = new JsonlLogger({ dir: dir, now: () => T });
+    const throwing: Record<string, unknown> = {};
+    Object.defineProperty(throwing, 'bad', {
+        enumerable: true,
+        get: (): never => {
+            throw new Error('no');
+        },
+    });
+    assert.doesNotThrow(() => {
+        logger.area('engine').log('info', 'big', { n: 12345678901234567890n });
+        logger.area('engine').log('info', 'getter', { reqId: 3, x: throwing });
+    });
+    const day: LogLine[] = lines(join(dir, `app-${dayStamp(T)}.jsonl`));
+    assert.deepEqual(day[0]?.data, { n: '12345678901234567890' });
+    assert.equal(day[1]?.msg, 'getter');
+    assert.deepEqual(day[1]?.data, { logError: 'the data could not be written as JSON' });
+});
+
+test('prunes again while the app stays open, not only at start-up', () => {
+    const dir: string = tempDir();
+    let now: number = T;
+    const logger: JsonlLogger = new JsonlLogger({ dir: dir, now: () => now });
+    const old: string = join(dir, 'app-2026-11-08.jsonl');
+    writeFileSync(old, 'x');
+    const when: Date = new Date(T - 13 * 24 * 3600 * 1000); // 13 days old: kept at start-up
+    utimesSync(old, when, when);
+    logger.area('app').log('info', 'a line');
+    assert.equal(existsSync(old), true);
+    now = T + 2 * 24 * 3600 * 1000; // two days later, the app still open
+    logger.area('app').log('info', 'another line');
+    assert.equal(existsSync(old), false, 'pruned once 14 days old');
+});
+
+test('pruning a folder that has gone never throws', () => {
+    const dir: string = tempDir();
+    const logger: JsonlLogger = new JsonlLogger({ dir: dir, now: () => T });
+    rmSync(dir, { recursive: true, force: true });
+    assert.doesNotThrow(() => logger.prune());
+});

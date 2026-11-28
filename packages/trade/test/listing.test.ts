@@ -116,6 +116,8 @@ test('reads a search response', () => {
         inexact: true,
         complexity: undefined,
     });
+    // An object where the ids should be is a bad response, not zero listings (#83).
+    assert.throws(() => readSearchResponse({ id: 'q3', result: {}, total: 12 }), /search\.result: expected an array/);
 });
 
 test('reads the site error body', () => {
@@ -157,4 +159,66 @@ test('every recorded V19 fetch response parses', { skip: existsSync(V19_FILE) ? 
     }
     assert.equal(listings, 560);
     assert.equal(rarities.get('Rare'), 482);
+});
+
+// G19 (V28): item.extended.hashes names the mod behind each line, per domain. In V19, a Deacon's boot has flat ES
+// and mana from mod 3 (the ES + mana hybrid) and the bench's "Upgraded" Movement Speed + Onslaught craft as
+// crafted mod 0; another has life summed from two mods (indices 1 and 3).
+test(
+    'stat sources keep each line of extended.hashes with its domain and mod indices',
+    { skip: existsSync(V19_FILE) ? false : `no fixture at ${V19_FILE}` },
+    () => {
+        const raw: unknown = JSON.parse(readFileSync(V19_FILE, 'utf8'));
+        assert.ok(typeof raw === 'object' && raw !== null && 'fetch' in raw && Array.isArray(raw.fetch));
+        const byId: Map<string, TradeListing> = new Map<string, TradeListing>();
+        for (const call of raw.fetch as readonly unknown[]) {
+            assert.ok(typeof call === 'object' && call !== null && 'ids' in call && 'json' in call && Array.isArray(call.ids));
+            const ids: string[] = call.ids.filter((id: unknown): id is string => typeof id === 'string');
+            for (const l of readFetchResponse(call.json, ids).listings) {
+                byId.set(l.id, l);
+            }
+        }
+        const deacon: TradeListing | undefined = byId.get('2ec94c022cec19007a9031a7c507b3f591e24204df096f23d1d4d1263b101449');
+        assert.ok(deacon);
+        assert.deepEqual(deacon.statSources, [
+            { kind: 'explicit', statId: 'explicit.stat_1999113824', mods: [1] },
+            { kind: 'explicit', statId: 'explicit.stat_4052037485', mods: [3] },
+            { kind: 'explicit', statId: 'explicit.stat_1050105434', mods: [3] },
+            { kind: 'explicit', statId: 'explicit.stat_1671376347', mods: [2] },
+            { kind: 'explicit', statId: 'explicit.stat_2923486259', mods: [0] },
+            { kind: 'crafted', statId: 'crafted.stat_2250533757', mods: [0] },
+            { kind: 'crafted', statId: 'crafted.stat_3023957681', mods: [0] },
+        ]);
+        const summed: TradeListing | undefined = byId.get('a47a11318074b3830bfe1cbee989d1837b23d8dbeb15a051e993c1e8d58dac8b');
+        assert.ok(summed);
+        assert.deepEqual(
+            summed.statSources.filter((s) => s.mods.length > 1),
+            [
+                { kind: 'explicit', statId: 'explicit.stat_4052037485', mods: [1, 2] },
+                { kind: 'explicit', statId: 'explicit.stat_3299347043', mods: [1, 3] },
+            ],
+        );
+    },
+);
+
+test('stat sources skip what extended.hashes does not tie to a mod', () => {
+    const json: Record<string, unknown> = listingJson('h', 1, 'chaos') as Record<string, unknown>;
+    const item: Record<string, unknown> = json['item'] as Record<string, unknown>;
+    const extended: Record<string, unknown> = item['extended'] as Record<string, unknown>;
+    const odd: unknown = {
+        ...json,
+        item: {
+            ...item,
+            extended: {
+                ...extended,
+                hashes: {
+                    explicit: [['explicit.stat_3299347043', [0]], ['explicit.stat_2923486259', null], ['explicit.stat_1', ['x']], 'junk'],
+                    unknownKind: [['explicit.stat_2', [0]]],
+                },
+            },
+        },
+    };
+    const listing: TradeListing | undefined = readFetchResponse({ result: [odd] }, ['h']).listings[0];
+    assert.ok(listing);
+    assert.deepEqual(listing.statSources, [{ kind: 'explicit', statId: 'explicit.stat_3299347043', mods: [0] }]);
 });

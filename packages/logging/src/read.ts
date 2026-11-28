@@ -1,7 +1,7 @@
 // Reading the logs back (PLAN.md, Logging, "Using it"): the Logs view shows recent lines with level and area
 // filters, and Export logs writes the day's file and a run's file again, redacted a second time.
 
-import { closeSync, existsSync, fstatSync, openSync, readSync } from 'node:fs';
+import { closeSync, fstatSync, openSync, readSync } from 'node:fs';
 import { redact } from './logger.ts';
 import type { LogLevel, LogLine } from './logger.ts';
 
@@ -42,12 +42,24 @@ export function parseLogLine(text: string): LogLine | undefined {
     };
 }
 
-/** The last `maxBytes` of a file as text, starting at a whole line; '' when there is no file. */
+function isMissing(error: unknown): boolean {
+    return typeof error === 'object' && error !== null && 'code' in error && error.code === 'ENOENT';
+}
+
+/**
+ * The last `maxBytes` of a file as text, starting at a whole line; '' when there is no file. Opened without a
+ * separate exists check, so a prune deleting the file in between can't make it throw.
+ */
 export function readTail(file: string, maxBytes: number = TAIL_BYTES): string {
-    if (!existsSync(file)) {
-        return '';
+    let fd: number;
+    try {
+        fd = openSync(file, 'r');
+    } catch (error: unknown) {
+        if (isMissing(error)) {
+            return '';
+        }
+        throw error;
     }
-    const fd: number = openSync(file, 'r');
     try {
         const size: number = fstatSync(fd).size;
         const start: number = Math.max(0, size - maxBytes);

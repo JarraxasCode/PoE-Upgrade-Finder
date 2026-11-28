@@ -8,7 +8,6 @@ import type {
     EvaluatedItem,
     ExclusionMatch,
     FilteredItem,
-    LevelFilter,
     MatchedLine,
     PlanMatch,
     PobStats,
@@ -16,8 +15,10 @@ import type {
     RequirementMatch,
     RunResult,
     SearchRecord,
-    SlotPlan,
+    SearchRequirement,
+    SearchSockets,
     SlotSearchSpec,
+    SocketMatch,
 } from '@poe-upgrade-finder/core';
 import { statChanges } from './stat-changes.ts';
 import type {
@@ -33,6 +34,7 @@ import type {
     UiSearch,
 } from '@poe-upgrade-finder/ipc';
 import type { PolicySnapshot, TradePolicy } from '@poe-upgrade-finder/trade';
+import type { LevelFilter, SlotInfluence, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 function pct(n: number): number | null {
     return Number.isFinite(n) ? n : null;
@@ -98,7 +100,62 @@ function defenceCheck(d: DefenceMatch): UiPlanCheck {
     return { kind: 'defence', label: planRule(d.label).label, status: d.status, value: defenceValue(d), lines: [] };
 }
 
-/** The plan's includes first, then the build's hard needs, the excludes and the defences. */
+function socketCheck(s: SocketMatch): UiPlanCheck {
+    return { kind: 'socket', label: planRule(s.label).label, status: s.status, value: s.value, lines: [] };
+}
+
+/** A hard need for the run header: "chaos res ≥ 22", and the gap it came from when it was capped (#34). */
+export function hardNeedText(r: SearchRequirement): string {
+    const text: string = r.label.replace(/^Required: /, '').replace(/, from strip$/, '');
+    return r.gap === undefined
+        ? text
+        : `${text} (without this item the build is ${r.gap} short of the floor, more than the item carries itself)`;
+}
+
+/** The site's names for PoB's influence keys. */
+const INFLUENCE_NAMES: Readonly<Record<SlotInfluence, string>> = {
+    none: 'no',
+    shaper: 'Shaper',
+    elder: 'Elder',
+    adjudicator: 'Warlord',
+    basilisk: 'Hunter',
+    crusader: 'Crusader',
+    eyrie: 'Redeemer',
+};
+
+/**
+ * What narrowed a run's search, for the verdict when no listing in budget matched (#34): the build's hard needs,
+ * the plan's includes, defences and socket filters, the base, influences, the unique and the level filter (not instant buyout: whisper listings are the user's own choice). Read
+ * from the spec, so it costs no trade calls; it can't say which one emptied the search.
+ */
+export function emptyRunCauses(spec: SlotSearchSpec): string[] {
+    const causes: string[] = [
+        ...spec.requirements.filter((r) => r.origin === 'strip').map((r) => `${hardNeedText(r)}, from a floor in Settings`),
+        ...spec.requirements.filter((r) => r.origin === 'plan').map((r) => planRule(r.label).label),
+        ...spec.defences.map((d) => planRule(d.label).label),
+        ...socketLabels(spec.sockets),
+    ];
+    if (spec.baseType !== null && spec.unique === null) {
+        causes.push(`base ${spec.baseType}`);
+    }
+    if (spec.influences.length > 0) {
+        causes.push(`${spec.influences.map((i: SlotInfluence) => INFLUENCE_NAMES[i]).join(' and ')} influence`);
+    }
+    if (spec.unique !== null) {
+        causes.push(`the unique ${spec.unique.name}`);
+    }
+    if (spec.maxLevelRequirement !== undefined) {
+        causes.push(`up to level ${spec.maxLevelRequirement}`);
+    }
+    return causes;
+}
+
+/** The socket filters (#58) for the run header: "Links ≥ 6". */
+export function socketLabels(sockets: readonly SearchSockets[]): string[] {
+    return sockets.map((s: SearchSockets) => planRule(s.label).label);
+}
+
+/** The plan's includes first, then the build's hard needs, the excludes, the defences and the socket filters. */
 export function planChecks(m: PlanMatch): UiPlanCheck[] {
     const requirements: UiPlanCheck[] = m.requirements.map(requirementCheck);
     return [
@@ -106,6 +163,7 @@ export function planChecks(m: PlanMatch): UiPlanCheck[] {
         ...requirements.filter((c: UiPlanCheck) => c.kind === 'need'),
         ...m.exclusions.map(exclusionCheck),
         ...m.defences.map(defenceCheck),
+        ...m.sockets.map(socketCheck),
     ];
 }
 
@@ -118,7 +176,7 @@ export function toUiRunPlan(plan: SlotPlan, spec: SlotSearchSpec, notes: readonl
         itemType: plan.itemType,
         base: spec.baseType,
         includes: spec.requirements.filter((r) => r.origin === 'plan').map((r) => planRule(r.label)),
-        excludes: spec.exclusions.map((e) => planRule(e.label).label),
+        excludes: [...spec.exclusions, ...spec.modExclusions].map((e) => planRule(e.label).label),
         defences: spec.defences.map((d) => planRule(d.label).label),
         influences: [...spec.influences],
         pruned: spec.pruned.length,
@@ -148,6 +206,7 @@ export function toUiItem(e: EvaluatedItem, league: string, baseline: PobStats, f
         price: i.price === undefined ? null : { amount: i.price.amount, currency: i.price.currency },
         chaos: i.chaosEquivalent ?? null,
         bandId: i.bandId,
+        role: i.role,
         gainPct: pct(e.gain.gain),
         dpsPct: pct(e.gain.dpsPct),
         ehpPct: pct(e.gain.ehpPct),

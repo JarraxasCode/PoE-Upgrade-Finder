@@ -1,19 +1,20 @@
 import assert from 'node:assert/strict';
+import { existsSync, readFileSync } from 'node:fs';
 import { test } from 'node:test';
-import { RateLimitStop, readItemDisplay, TradeError } from '@poe-upgrade-finder/trade';
-import type { FetchResponse, SearchResponse, TradeListing, TradeSearchBody } from '@poe-upgrade-finder/trade';
+import { fileURLToPath } from 'node:url';
+import { RateLimitStop, readFetchResponse, readItemDisplay, TradeError } from '@poe-upgrade-finder/trade';
+import type { FetchResponse, SearchResponse, StatSource, TradeListing, TradeSearchBody } from '@poe-upgrade-finder/trade';
 import { priceBands } from '../src/bands.ts';
 import { DEFAULT_FLOORS } from '../src/floors.ts';
-import { deepenSlotSearch, interleave, runSlotSearch } from '../src/run.ts';
+import { deepenSlotSearch, interleave, offHandName, offHandWarning, runSlotSearch } from '../src/run.ts';
 import type { EngineScore, RunEngine, RunEvent, RunResult, RunTrade } from '../src/run.ts';
 import type { SlotSearchSpec } from '../src/spec.ts';
-import { v1SpecBuilder } from '../src/v1.ts';
-import { baseStats } from './fixtures.ts';
+import { baseStats, emptyPlanSpec } from './fixtures.ts';
 
 const RATE: number = 200;
 
 function spec(budget: number): SlotSearchSpec {
-    return v1SpecBuilder().build({
+    return emptyPlanSpec({
         slot: 'Boots',
         listingType: 'securable',
         priceBands: priceBands(budget, { overFactor: 1.25 }),
@@ -41,6 +42,7 @@ function listing(id: string, amount: number, currency: string, gainPct: number, 
         corrupted: false,
         statIds: [],
         statLines: [],
+        statSources: [],
         price: { amount: amount, currency: currency, type: '~b/o' },
         indexed: undefined,
         seller: `s-${id}`,
@@ -56,6 +58,8 @@ class FakeTrade implements RunTrade {
     private readonly byKey: Map<string, readonly TradeListing[]>;
     private readonly byId: Map<string, TradeListing> = new Map<string, TradeListing>();
     public failSearchAt: number | undefined;
+    /** A second 429 in a row at this search (issue #79). */
+    public rateLimitedSearchAt: number | undefined;
     public stopAtFetch: number | undefined;
     /** Ids served as entries that failed validation. */
     public readonly malformedIds: Set<string> = new Set<string>();
@@ -73,6 +77,9 @@ class FakeTrade implements RunTrade {
         this.searches.push(body);
         if (this.failSearchAt === this.searches.length) {
             return Promise.reject(new TradeError('site-error', 'search: Query is too complex', 400, 2));
+        }
+        if (this.rateLimitedSearchAt === this.searches.length) {
+            return Promise.reject(new TradeError('rate-limited', 'search: rate limited again after waiting out the first limit.', 429));
         }
         const price = body.query.filters.trade_filters.filters.price;
         const ids: string[] = (this.byKey.get(`${price.option}:${price.max}`) ?? []).map((l: TradeListing) => l.id);
@@ -121,6 +128,7 @@ const fakeEngine: RunEngine = {
                 stats: { damage: base.damage * (1 + g), values: values },
                 unparsed: [],
                 validForSlot: !text.includes('wrong-slot'),
+                offHandRemoved: text.includes('two-hand'),
             });
         });
         return Promise.resolve();
@@ -139,6 +147,73 @@ test('interleave takes from each list in turn, up to its count', () => {
         ['a1', 'b1', 'a2', 'a3'],
     );
     assert.deepEqual(interleave([['a1'], []], [5, 5]), ['a1']);
+});
+
+test('interleave tops up past ids an earlier band fetched, and passes them through once (#111)', () => {
+    const fetched: ReadonlySet<string> = new Set<string>(['a1', 'b1']);
+    assert.deepEqual(
+        interleave(
+            [
+                ['a1', 'a2', 'a3'],
+                ['b1', 'b2', 'b3'],
+            ],
+            [1, 2],
+            (id: string) => fetched.has(id),
+        ),
+        ['a1', 'a2', 'b1', 'b2', 'b3'],
+    );
+    // The same id in two lists comes out once and counts once.
+    assert.deepEqual(
+        interleave(
+            [
+                ['x', 'a'],
+                ['x', 'b'],
+            ],
+            [1, 1],
+        ),
+        ['x', 'b'],
+    );
+});
+
+test('a band whose top listing an earlier band fetched still fetches its share, priced into its role (#111)', async () => {
+    // Depth 1 per band. 'dup' (300c, exactly the budget) comes back from the top band and the over band.
+    const trade: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([
+            ['chaos:300', [listing('dup', 300, 'chaos', 5)]],
+            ['chaos:375', [listing('dup', 300, 'chaos', 5), listing('o2', 340, 'chaos', 9)]],
+        ]),
+    );
+    const events: RunEvent[] = [];
+    const result: RunResult = await runSlotSearch(
+        { league: 'Covens', spec: spec(300), baseline: baseStats(), blend: 0.5, depth: 1, chaosPerDivine: undefined },
+        trade,
+        fakeEngine,
+        (e: RunEvent) => {
+            events.push(e);
+        },
+    );
+    assert.deepEqual(trade.fetches, [['dup'], ['o2']]);
+    assert.ok(events.some((e: RunEvent) => e.kind === 'skipped' && e.reason === 'already-fetched' && e.listingId === 'dup'));
+    const roleOf = (id: string): string | undefined => result.items.find((f) => f.evaluated.item.id === id)?.evaluated.item.role;
+    assert.equal(roleOf('dup'), 'main');
+    assert.equal(roleOf('o2'), 'over');
+    assert.ok(result.verdict.kind === 'pick' && result.verdict.pick.item.id === 'dup');
+});
+
+test('"N listings in budget" counts a listing two bands returned once (#111)', async () => {
+    const trade: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([
+            ['chaos:100', [listing('broken-a', 100, 'chaos', 1)]],
+            ['chaos:300', [listing('broken-a', 100, 'chaos', 1), listing('broken-b', 200, 'chaos', 1)]],
+        ]),
+    );
+    const result: RunResult = await runSlotSearch(
+        { league: 'Covens', spec: spec(300), baseline: baseStats(), blend: 0.5, depth: 100, chaosPerDivine: undefined },
+        trade,
+        fakeEngine,
+        () => undefined,
+    );
+    assert.equal(result.verdict.note, 'No upgrade found: none of the 2 listings in budget could be scored (the run summary says why).');
 });
 
 test('a run: bands cheapest first, divine search only from 1 div up, live items, junk filter and the pick', async () => {
@@ -344,4 +419,215 @@ test('a malformed listing is skipped with a warning; the rest of its batch is sc
     assert.equal(result.counts.skipped, 1);
     assert.ok(events.some((e: RunEvent) => e.kind === 'skipped' && e.listingId === 'bad' && e.reason === 'malformed'));
     assert.ok(events.some((e: RunEvent) => e.kind === 'warning' && /could not be read/.test(e.message)));
+});
+
+test('a repeated 429 (rate-limited) stops the run instead of moving on to the next band (issue #79)', async () => {
+    const trade: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([
+            ['chaos:33', [listing('a', 10, 'chaos', 3)]],
+            ['chaos:100', [listing('b', 50, 'chaos', 4)]],
+            ['chaos:300', [listing('c', 200, 'chaos', 6)]],
+        ]),
+    );
+    trade.rateLimitedSearchAt = 1;
+    const result: RunResult = await runSlotSearch(
+        { league: 'Covens', spec: spec(300), baseline: baseStats(), blend: 0.5, depth: 100, chaosPerDivine: RATE },
+        trade,
+        fakeEngine,
+        () => undefined,
+    );
+    assert.match(result.stoppedReason ?? '', /rate limited again/);
+    assert.equal(trade.searches.length, 1);
+    assert.equal(trade.fetches.length, 0);
+});
+
+test('results scored without the off-hand get one warning naming it (#39, #101)', async () => {
+    const trade: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([
+            [
+                'chaos:300',
+                [listing('one-hand', 150, 'chaos', 2), listing('two-hand-a', 160, 'chaos', 2), listing('two-hand-b', 170, 'chaos', 3)],
+            ],
+        ]),
+    );
+    const events: RunEvent[] = [];
+    const result: RunResult = await runSlotSearch(
+        { league: 'Covens', spec: spec(300), baseline: baseStats(), blend: 0.5, depth: 100, chaosPerDivine: RATE, offHand: 'shield' },
+        trade,
+        fakeEngine,
+        (e: RunEvent) => {
+            events.push(e);
+        },
+    );
+    assert.equal(result.counts.scored, 3, 'they are still scored and shown');
+    const warnings: string[] = events.flatMap((e: RunEvent) =>
+        e.kind === 'warning' && /off-hand|beside your/.test(e.message) ? [e.message] : [],
+    );
+    assert.deepEqual(warnings, [offHandWarning('shield')]);
+    assert.match(warnings[0] ?? '', /beside your shield: they were scored without it/);
+});
+
+test('offHandName names the saved Weapon 2 by its type', () => {
+    assert.equal(offHandName('Shield'), 'shield');
+    assert.equal(offHandName('Quiver'), 'quiver');
+    assert.equal(offHandName('Wand'), 'off-hand weapon');
+    assert.equal(offHandName(undefined), 'off-hand');
+});
+
+test("listings PoB won't equip are counted by reason, with a warning when most of a band is (#39)", async () => {
+    const trade: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([
+            [
+                'chaos:300',
+                [
+                    listing('ok', 150, 'chaos', 2),
+                    listing('wrong-slot-a', 160, 'chaos', 2),
+                    listing('wrong-slot-b', 170, 'chaos', 2),
+                    listing('wrong-slot-c', 175, 'chaos', 2),
+                    listing('unid', 180, 'chaos', 2, { identified: false }),
+                ],
+            ],
+        ]),
+    );
+    const events: RunEvent[] = [];
+    const input = { league: 'Covens', spec: spec(300), baseline: baseStats(), blend: 0.5, depth: 100, chaosPerDivine: RATE };
+    const result: RunResult = await runSlotSearch({ ...input, besides: 'beside a Wand' }, trade, fakeEngine, (e: RunEvent) => {
+        events.push(e);
+    });
+    assert.equal(result.counts.skipped, 4);
+    assert.deepEqual(result.counts.skippedBy, {
+        'not-for-slot': 3,
+        unidentified: 1,
+        'already-fetched': 0,
+        malformed: 0,
+        'excluded-mod': 0,
+    });
+    const warnings: string[] = events.flatMap((e: RunEvent) => (e.kind === 'warning' && /won't equip/.test(e.message) ? [e.message] : []));
+    assert.equal(warnings.length, 1);
+    assert.match(warnings[0] ?? '', /: PoB won't equip 3 of 5 listings in Boots beside a Wand, so they were skipped\.$/);
+
+    // Half or fewer: no warning. A deeper pass carries the counts over.
+    const fewer: FakeTrade = new FakeTrade(
+        new Map<string, readonly TradeListing[]>([['chaos:300', [listing('ok', 150, 'chaos', 2), listing('wrong-slot', 160, 'chaos', 2)]]]),
+    );
+    const quiet: RunEvent[] = [];
+    const first: RunResult = await runSlotSearch(input, fewer, fakeEngine, (e: RunEvent) => {
+        quiet.push(e);
+    });
+    assert.equal(
+        quiet.some((e: RunEvent) => e.kind === 'warning' && /won't equip/.test(e.message)),
+        false,
+    );
+    const deeper: RunResult = await deepenSlotSearch(input, first, fewer, fakeEngine, () => undefined);
+    assert.equal(deeper.counts.skippedBy['not-for-slot'], 1);
+});
+
+// #38 on real mod indices: three V19 boots (test/fixtures/trade, private repo only). Deacon's has flat ES and mana
+// from one mod (the hybrid); fc82... has both stats from separate mods (an ES + life hybrid and the pure mana prefix).
+const V19_FILE: string = fileURLToPath(new URL('../../../test/fixtures/trade/v19-boots-raw.json', import.meta.url));
+
+function v19Sources(): ReadonlyMap<string, readonly StatSource[]> {
+    const raw: unknown = JSON.parse(readFileSync(V19_FILE, 'utf8'));
+    assert.ok(typeof raw === 'object' && raw !== null && 'fetch' in raw && Array.isArray(raw.fetch));
+    const out: Map<string, readonly StatSource[]> = new Map<string, readonly StatSource[]>();
+    for (const call of raw.fetch as readonly unknown[]) {
+        assert.ok(typeof call === 'object' && call !== null && 'ids' in call && 'json' in call && Array.isArray(call.ids));
+        const ids: string[] = call.ids.filter((id: unknown): id is string => typeof id === 'string');
+        for (const l of readFetchResponse(call.json, ids).listings) {
+            out.set(l.id, l.statSources);
+        }
+    }
+    return out;
+}
+
+test(
+    'a listing with an excluded hybrid is dropped before scoring, counted per mod and noted per band (#38)',
+    { skip: existsSync(V19_FILE) ? false : `no fixture at ${V19_FILE}` },
+    async () => {
+        const sources: ReadonlyMap<string, readonly StatSource[]> = v19Sources();
+        const of = (id: string): readonly StatSource[] => {
+            const s: readonly StatSource[] | undefined = sources.get(id);
+            assert.ok(s, `no listing ${id}`);
+            return s;
+        };
+        const name: string = '+# to maximum Energy Shield / +# to maximum Mana';
+        const withHybrid: SlotSearchSpec = {
+            ...spec(300),
+            modExclusions: [
+                {
+                    statIds: ['explicit.stat_1050105434', 'explicit.stat_4052037485'],
+                    name: name,
+                    origin: 'plan',
+                    label: `Excluded: ${name} (hybrid mod), from plan`,
+                },
+            ],
+        };
+        const trade: FakeTrade = new FakeTrade(
+            new Map<string, readonly TradeListing[]>([
+                [
+                    'chaos:300',
+                    [
+                        listing('deacon', 150, 'chaos', 6, {
+                            statSources: of('2ec94c022cec19007a9031a7c507b3f591e24204df096f23d1d4d1263b101449'),
+                        }),
+                        listing('separate', 160, 'chaos', 3, {
+                            statSources: of('fc82c25153028551d41adcbb769d5c2b4245fdff6888d12bcc74b3a0e3910e43'),
+                        }),
+                        listing('plain', 170, 'chaos', 2),
+                    ],
+                ],
+            ]),
+        );
+        const scoredTexts: string[] = [];
+        const tracing: RunEngine = {
+            score(texts: readonly string[], onItem: (result: EngineScore) => void): Promise<void> {
+                scoredTexts.push(...texts);
+                return fakeEngine.score(texts, onItem);
+            },
+        };
+        const events: RunEvent[] = [];
+        const input = { league: 'Covens', spec: withHybrid, baseline: baseStats(), blend: 0.5, depth: 100, chaosPerDivine: RATE };
+        const result: RunResult = await runSlotSearch(input, trade, tracing, (e: RunEvent) => {
+            events.push(e);
+        });
+        // The hybrid boot never reaches PoB; the one with both stats from other mods is scored.
+        assert.equal(
+            scoredTexts.some((t: string) => t.includes('deacon')),
+            false,
+        );
+        assert.deepEqual(result.items.map((f) => f.evaluated.item.id).sort(), ['plain', 'separate']);
+        assert.equal(result.counts.scored, 2);
+        assert.equal(result.counts.skippedBy['excluded-mod'], 1);
+        assert.deepEqual(result.counts.excludedMods, [{ name: name, dropped: 1 }]);
+        assert.ok(events.some((e: RunEvent) => e.kind === 'skipped' && e.listingId === 'deacon' && e.reason === 'excluded-mod'));
+        const notes: string[] = events.flatMap((e: RunEvent) => (e.kind === 'note' ? [e.message] : []));
+        assert.equal(notes.length, 1);
+        assert.ok((notes[0] ?? '').endsWith(`: 1 listing dropped for an excluded mod (${name}).`), `note: ${notes[0] ?? 'none'}`);
+        // A deeper pass carries the counts over.
+        const deeper: RunResult = await deepenSlotSearch(input, result, trade, tracing, () => undefined);
+        assert.deepEqual(deeper.counts.excludedMods, [{ name: name, dropped: 1 }]);
+    },
+);
+
+test('an empty run hands what narrowed it, and the over-budget count, to the verdict (#34)', async () => {
+    const trade: FakeTrade = new FakeTrade(new Map<string, readonly TradeListing[]>([['chaos:375', [listing('over', 350, 'chaos', 1)]]]));
+    const result: RunResult = await runSlotSearch(
+        {
+            league: 'Covens',
+            spec: spec(300),
+            baseline: baseStats(),
+            blend: 0.5,
+            depth: 100,
+            chaosPerDivine: undefined,
+            emptyCauses: ['Links ≥ 6'],
+        },
+        trade,
+        fakeEngine,
+        () => undefined,
+    );
+    assert.equal(
+        result.verdict.note,
+        'No upgrade found: no listings in budget matched the search. 1 listing just over budget did. What narrowed it: Links ≥ 6. ' +
+            'Try a bigger budget, or loosening one of these.',
+    );
 });

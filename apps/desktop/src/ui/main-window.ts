@@ -9,6 +9,7 @@ import { BrowserWindow, screen } from 'electron';
 import type { Event, IpcMainInvokeEvent, WebContentsConsoleMessageEventParams } from 'electron';
 import { repoRoot } from '@poe-upgrade-finder/engine-client';
 import type { Logger } from '@poe-upgrade-finder/logging';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 // From the app root, not import.meta: main runs as one bundle in the packaged app.
 const DESKTOP_DIR: string = join(repoRoot(), 'apps', 'desktop');
@@ -98,7 +99,10 @@ export function createMainWindow(options: MainWindowOptions): BrowserWindow {
         log.log('error', 'renderer gone', { reason: details.reason, exitCode: details.exitCode });
         options.onProblem?.(`renderer gone: ${details.reason}`);
     });
-    void win.loadFile(UI_INDEX_FILE);
+    win.loadFile(UI_INDEX_FILE).catch((error: unknown) => {
+        log.log('error', 'the main window page did not load', { error: messageOf(error) });
+        options.onProblem?.(`page load failed: ${messageOf(error)}`);
+    });
     return win;
 }
 

@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "Trade client: the one shared rate limiter, search, fetch and exchange; GGG's currency-exchange digest for the divine rate. The HTTP layer is injected.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@poe-upgrade-finder/validate": "0.1.0"
+    "@poe-upgrade-finder/validate": "0.1.0",
+    "@poe-upgrade-finder/vocab": "0.1.0"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json",

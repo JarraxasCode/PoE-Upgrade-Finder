@@ -3,8 +3,11 @@
 import { NO_PLAN_MATCH } from '../src/plan-match.ts';
 import type { EvaluatedItem } from '../src/evaluate.ts';
 import type { Gain } from '../src/gain.ts';
-import type { ListedItem } from '../src/spec.ts';
+import { buildSlotSpec } from '../src/slot-spec.ts';
+import type { SlotSpecResult } from '../src/slot-spec.ts';
+import type { ListedItem, RunContext, SlotSearchSpec } from '../src/spec.ts';
 import type { PobStats } from '../src/stats.ts';
+import { emptySlotPlan } from '@poe-upgrade-finder/vocab';
 
 /** A build with every floor met: res capped at 75 with overcap, chaos 75, block 75, attributes met. */
 export function baseStats(overrides: Readonly<Record<string, number | boolean>> = {}, damage: number = 1_000_000): PobStats {
@@ -52,6 +55,7 @@ export function listed(id: string, chaos: number | undefined, overrides: Partial
         price: chaos === undefined ? { amount: 3, currency: 'exalted', type: '~b/o' } : { amount: chaos, currency: 'chaos', type: '~b/o' },
         chaosEquivalent: chaos,
         bandId: 'band-2',
+        role: overrides.bandId === 'over' ? 'over' : 'main',
         ...overrides,
     };
 }
@@ -74,4 +78,13 @@ export function evaluated(item: ListedItem, gainPct: number, floorsPass: boolean
         flags: [],
         plan: NO_PLAN_MATCH,
     };
+}
+
+/** The spec with no slot plan (v0.1's search), built the one way specs are built. */
+export function emptyPlanSpec(context: RunContext): SlotSearchSpec {
+    const result: SlotSpecResult = buildSlotSpec(emptySlotPlan(context.slot), { context: context, slotData: undefined });
+    if (!result.ok) {
+        throw new Error(`an empty plan was refused: ${result.check.problems.map((p) => p.text).join('; ')}`);
+    }
+    return result.spec;
 }

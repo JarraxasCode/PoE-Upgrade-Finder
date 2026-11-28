@@ -1,5 +1,5 @@
 export { pobSha1 } from './hash.ts';
-export { checkHooks, POB_HOOKS } from './hooks.ts';
+export { checkHooks, missingHooks, POB_HOOKS } from './hooks.ts';
 export type { PobHook } from './hooks.ts';
 export { compareVersions, parseManifest, repoPath } from './manifest.ts';
 export type { ManifestFile, ManifestPart, PobManifest } from './manifest.ts';

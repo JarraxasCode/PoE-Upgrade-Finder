@@ -3,36 +3,36 @@
 // multi-slot batch (v0.4) calls it once per plan over the same limiter and PoB worker.
 //
 // It runs inside the worker lock (the caller's EngineSession.exclusive) and fetches nothing on its own: the
-// slot data and the generator lookup are handed in, so nothing here takes the lock again.
+// slot data and the weights lookup are handed in, so nothing here takes the lock again.
 
-import { buildSlotSpec, checkPlan, pruneWeights, runSlotSearch } from '@poe-upgrade-finder/core';
+import { buildSlotSpec, runSlotSearch } from '@poe-upgrade-finder/core';
 import type {
-    FloorSettings,
     PlanCheck,
     PriceBand,
-    PrunedWeight,
     RunEvent,
     RunResult,
     RunTrade,
-    SlotPlan,
     SlotRunInput,
     SlotSearchSpec,
     SlotSpecResult,
-    WeightedStat,
 } from '@poe-upgrade-finder/core';
 import type {
     EngineClient,
-    GearSlot,
     SlotData,
     StripData,
     TargetRequest,
     TradeQueryData,
+    UniqueInfo,
+    UniquesData,
     WithWarnings,
 } from '@poe-upgrade-finder/engine-client';
-import type { LevelFilter, ListingType, PrunedStat } from '@poe-upgrade-finder/ipc';
 import type { LoadedBuild } from '../services/engine-session.ts';
+import { refuseQueryError } from '../services/weights.ts';
 import { UserFacingError } from '../ui/user-facing-error.ts';
-import { engineAdapter } from './shared.ts';
+import { engineAdapter, planGear } from './shared.ts';
+import { isUniquePlan } from '@poe-upgrade-finder/vocab';
+import type { FloorSettings, GearSlot, LevelFilter, ListingType, SlotPlan, WeightEdits } from '@poe-upgrade-finder/vocab';
+import { pickedUnique, uniqueNotes, uniqueRunQuery } from './unique-run.ts';
 
 /** One slot's work, fixed before it starts. */
 export interface SlotPlanJob {
@@ -45,11 +45,13 @@ export interface SlotPlanJob {
     readonly bands: readonly PriceBand[];
     readonly floors: FloorSettings;
     /** The user's weight review for this slot. */
-    readonly weightEdits: Readonly<Record<string, number>> | undefined;
+    readonly weightEdits: WeightEdits | undefined;
     /** The build's level requirement filter (issue #22). */
     readonly levelFilter: LevelFilter;
-    /** PoB's trade query for the slot (the generator, or its cache). */
-    readonly pobQuery: (client: EngineClient, slot: GearSlot) => Promise<TradeQueryData>;
+    /** The weights for the slot (WeightService.weightsFor: PoB's generator, or its cache). */
+    readonly weights: (client: EngineClient, slot: GearSlot) => Promise<TradeQueryData>;
+    /** The uniques for the slot's item type, for a unique run (UniqueService.uniquesFor, or its cache; #113). */
+    readonly uniques: (client: EngineClient, slot: GearSlot, itemType: string) => Promise<UniquesData>;
     /** Between steps: throws when the run was cancelled or the build changed meanwhile. */
     readonly checkpoint: () => void;
 }
@@ -60,6 +62,8 @@ export interface PreparedSlot {
     readonly stripped: StripData;
     /** The plan's check: notes on what it changed (redundant excludes left out). */
     readonly check: PlanCheck;
+    /** A unique run's notes on hard needs the unique has no line for (#113); empty for a rare run. */
+    readonly uniqueNotes: readonly string[];
 }
 
 /**
@@ -73,7 +77,17 @@ export async function prepareSlotPlan(client: EngineClient, job: SlotPlanJob): P
     job.checkpoint();
     const stripped: WithWarnings<StripData> = await client.strip(slot, { target: job.target });
     job.checkpoint();
-    const query: TradeQueryData = await job.pobQuery(client, slot);
+    // A unique run weighs the unique's own rolls, so PoB's generator isn't run (#113).
+    let unique: UniqueInfo | undefined;
+    let query: TradeQueryData;
+    if (isUniquePlan(plan) && plan.itemType !== null) {
+        const data: UniquesData = await job.uniques(client, slot, plan.itemType);
+        unique = pickedUnique(data, plan.unique);
+        query = uniqueRunQuery(slot, plan.itemType, data, loaded.load.equipped);
+    } else {
+        query = await job.weights(client, slot);
+        refuseQueryError(slot, query);
+    }
     job.checkpoint();
     const built: SlotSpecResult = buildSlotSpec(plan, {
         context: {
@@ -83,17 +97,21 @@ export async function prepareSlotPlan(client: EngineClient, job: SlotPlanJob): P
             characterLevel: loaded.load.info.level,
             baseline: loaded.stats,
             stripped: stripped.stats,
+            itemTotals: stripped.itemTotals,
             pobQuery: query,
             floors: job.floors,
             weightEdits: job.weightEdits,
             levelFilter: job.levelFilter,
         },
         slotData: job.slotData,
+        gear: planGear(loaded.load.equipped),
+        ...(unique === undefined ? {} : { unique: unique }),
     });
     if (!built.ok) {
         throw new UserFacingError(`The slot plan can't be searched: ${built.check.problems.map((p) => p.text).join('; ')}.`);
     }
-    return { spec: built.spec, query: query, stripped: stripped, check: built.check };
+    const notes: readonly string[] = unique === undefined ? [] : uniqueNotes(unique, built.spec.requirements);
+    return { spec: built.spec, query: query, stripped: stripped, check: built.check, uniqueNotes: notes };
 }
 
 export interface SlotPlanRun {
@@ -113,37 +131,4 @@ export async function runSlotPlan(
     const input: SlotRunInput = run.onPrepared(prepared);
     const result: RunResult = await runSlotSearch(input, run.trade, engineAdapter(client, job.plan.slot, job.target), run.onEvent);
     return { prepared: prepared, result: result };
-}
-
-/** What the weight review shows about a slot plan. */
-export interface PlanReview {
-    readonly pruned: readonly PrunedStat[];
-    readonly planProblems: readonly string[];
-    readonly planNotes: readonly string[];
-}
-
-export const NO_REVIEW: PlanReview = { pruned: [], planProblems: [], planNotes: [] };
-
-/**
- * The plan against PoB's weights (before the user's edits: pruning goes by stat, so it reads the same after
- * them): which weights it takes out and why, heaviest first, or why it can't be searched.
- */
-export function planReview(
-    plan: SlotPlan,
-    slotData: SlotData | undefined,
-    weights: readonly WeightedStat[],
-    label: (statId: string) => string,
-): PlanReview {
-    const check: PlanCheck = checkPlan(plan, plan.slot, slotData);
-    if (!check.ok) {
-        return { ...NO_REVIEW, planProblems: check.problems.map((p) => p.text) };
-    }
-    const { pruned } = pruneWeights(weights, plan, plan.slot, slotData);
-    return {
-        pruned: [...pruned]
-            .sort((a: PrunedWeight, b: PrunedWeight) => b.weight - a.weight)
-            .map((p: PrunedWeight) => ({ statId: p.statId, label: label(p.statId), weight: p.weight, reason: p.reason, text: p.text })),
-        planProblems: [],
-        planNotes: check.notes.map((n) => n.text),
-    };
 }

@@ -7,7 +7,7 @@ import type { CheckResult, ItemCheck, ItemNote, ListedItem, ScoredStats, SlotSea
 import type { PobStats } from './stats.ts';
 import { matchPlan } from './plan-match.ts';
 import type { PlanMatch } from './plan-match.ts';
-import type { DisplayLine } from '@poe-upgrade-finder/trade';
+import type { ItemLine } from '@poe-upgrade-finder/vocab';
 
 export interface EvaluatedItem {
     readonly item: ListedItem;
@@ -52,7 +52,8 @@ export function evaluateItem(
         flags: failed('flag'),
         plan: matchPlan(spec, {
             statLines: item.statLines,
-            properties: item.display?.properties.map((line: DisplayLine) => line.map((p) => p.text).join('')),
+            properties: item.display?.properties.map((line: ItemLine) => line.map((p) => p.text).join('')),
+            sockets: item.display?.sockets,
         }),
     };
 }

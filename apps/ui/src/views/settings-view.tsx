@@ -4,7 +4,7 @@
 import { LogsCard } from './logs-card.tsx';
 import { useEffect, useState } from 'preact/hooks';
 import type { JSX, TargetedEvent } from 'preact';
-import type { AppSettings, SearchDepth } from '@poe-upgrade-finder/ipc';
+import type { AppSettings } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import { appInfo, pobUpdate, setPobUpdate } from '../state/app-info.ts';
 import { buildsList, loadBuilds } from '../state/builds.ts';
@@ -12,6 +12,8 @@ import { readyValue } from '../state/loadable.ts';
 import { appSettings, saveSettings } from '../state/settings.ts';
 import { RateLine, SignInLine, TradeError } from './trade-status.tsx';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import { THOROUGH_NOTE } from '@poe-upgrade-finder/vocab';
+import type { SearchDepth } from '@poe-upgrade-finder/vocab';
 
 type SaveState =
     | { readonly kind: 'idle' }
@@ -92,6 +94,7 @@ function GeneralSettings(props: { readonly saved: AppSettings }): JSX.Element {
                         <option value="normal">Normal (50)</option>
                         <option value="quick">Quick (20)</option>
                     </select>
+                    {draft.depth === 'thorough' && <p class="muted small">{THOROUGH_NOTE}</p>}
                 </div>
             </div>
             <div class="field check">

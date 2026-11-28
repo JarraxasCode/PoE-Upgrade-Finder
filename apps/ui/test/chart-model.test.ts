@@ -12,6 +12,7 @@ function item(id: string, gain: number | null, chaos: number | null, over: Parti
         price: chaos === null ? null : { amount: chaos, currency: 'chaos' },
         chaos: chaos,
         bandId: 'b0',
+        role: 'main',
         gainPct: gain,
         dpsPct: gain,
         ehpPct: gain,

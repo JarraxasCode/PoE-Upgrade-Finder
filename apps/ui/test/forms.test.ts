@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { parseBudgetText } from '@poe-upgrade-finder/ipc';
-import type { FloorSettings } from '@poe-upgrade-finder/ipc';
 import { parseNumberText, setBool, setMaxResMin, setNumber, setTargetMaxRes, setTargetNumber } from '../src/floors-form.ts';
 import { ago, buildLabel, compact, signedPct } from '../src/format.ts';
+import type { FloorSettings } from '@poe-upgrade-finder/vocab';
 
 test('compact numbers', () => {
     assert.equal(compact(1_840_000), '1.84M');

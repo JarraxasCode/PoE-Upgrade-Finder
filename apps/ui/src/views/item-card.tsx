@@ -5,9 +5,9 @@
 
 import { Fragment } from 'preact';
 import type { ComponentChildren, JSX } from 'preact';
-import type { ItemView, ViewLine, ViewMod, ViewPart } from '@poe-upgrade-finder/ipc';
 import { anchorClass, hideTip, showInfo, showTip, tip } from '../state/tip.ts';
 import type { TipState } from '../state/tip.ts';
+import type { ItemLine, ItemMod, ItemPart, ItemView } from '@poe-upgrade-finder/vocab';
 
 const INFLUENCE_NAMES: Readonly<Record<string, string>> = {
     shaper: 'Shaper',
@@ -20,10 +20,10 @@ const INFLUENCE_NAMES: Readonly<Record<string, string>> = {
     tangled: 'Eater of Worlds',
 };
 
-function Line(props: { readonly line: ViewLine }): JSX.Element {
+function Line(props: { readonly line: ItemLine }): JSX.Element {
     return (
         <p>
-            {props.line.map((p: ViewPart, k: number) => (
+            {props.line.map((p: ItemPart, k: number) => (
                 <span key={k} class={`t-${p.tone}`}>
                     {p.text}
                 </span>
@@ -55,10 +55,10 @@ function Sockets(props: { readonly sockets: string }): JSX.Element {
     );
 }
 
-function Mods(props: { readonly mods: readonly ViewMod[] }): JSX.Element {
+function Mods(props: { readonly mods: readonly ItemMod[] }): JSX.Element {
     return (
         <div class="ic-section">
-            {props.mods.map((m: ViewMod, k: number) => (
+            {props.mods.map((m: ItemMod, k: number) => (
                 <p key={k} class={`m-${m.kind}`}>
                     {m.text}
                 </p>
@@ -78,14 +78,14 @@ export function ItemImage(props: { readonly view: ItemView; readonly size: 'row'
 
 export function ItemCard(props: { readonly view: ItemView; readonly image?: boolean }): JSX.Element {
     const v: ItemView = props.view;
-    const head: ViewLine[] = [];
+    const head: ItemLine[] = [];
     if (v.influences.length > 0) {
         head.push([
             { text: 'Influence: ', tone: 'label' },
             { text: v.influences.map((i) => INFLUENCE_NAMES[i] ?? i).join(', '), tone: 'plain' },
         ]);
     }
-    const tail: ViewLine[] = [];
+    const tail: ItemLine[] = [];
     if (v.itemLevel !== null) {
         tail.push([
             { text: 'Item Level: ', tone: 'label' },
@@ -93,15 +93,15 @@ export function ItemCard(props: { readonly view: ItemView; readonly image?: bool
         ]);
     }
     const sections: ComponentChildren[] = [];
-    const top: ViewLine[] = [...v.properties, ...head];
+    const top: ItemLine[] = [...v.properties, ...head];
     if (top.length > 0 || v.sockets !== '' || tail.length > 0) {
         sections.push(
             <div class="ic-section">
-                {top.map((l: ViewLine, k: number) => (
+                {top.map((l: ItemLine, k: number) => (
                     <Line key={k} line={l} />
                 ))}
                 {v.sockets !== '' && <Sockets sockets={v.sockets} />}
-                {tail.map((l: ViewLine, k: number) => (
+                {tail.map((l: ItemLine, k: number) => (
                     <Line key={`t${k}`} line={l} />
                 ))}
             </div>,

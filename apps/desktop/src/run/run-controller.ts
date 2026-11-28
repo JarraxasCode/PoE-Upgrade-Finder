@@ -1,5 +1,5 @@
-// One run at a time from the Search view (PLAN.md, How it works, steps 3 to 7), the same pipeline as the
-// headless mode: strip the slot, PoB's trade query, the spec, then runSlotSearch, streaming to the Run view.
+// One run at a time from the Search view (PLAN.md, How it works, steps 3 to 7): strip the slot, PoB's trade
+// query, the spec (buildSlotSpec, the one builder), then runSlotSearch, streaming to the Run view.
 //
 // The run holds the PoB worker for its whole length (EngineSession.exclusive), so a re-saved build reloads
 // only after it ends. Pause stops new trade calls (a fetched batch still finishes scoring); Cancel aborts.
@@ -15,37 +15,34 @@ import {
     buyLink,
     compileQuery,
     deepenSlotSearch,
-    generatorWeights,
     isEmptyPlan,
     isTradeSiteUrl,
+    offHandName,
     priceBands,
     splitDepth,
 } from '@poe-upgrade-finder/core';
 import type {
     EvaluatedItem,
     ModCatalog,
+    PlanGear,
     PobStats,
     PriceBand,
     RunEvent,
     RunResult,
     RunTrade,
-    SlotPlan,
     SlotRunInput,
     SearchRecord,
     SlotSearchSpec,
     WeightedStat,
 } from '@poe-upgrade-finder/core';
-import { DEPTH_PER_BAND, pobWeightList } from '@poe-upgrade-finder/core';
-import type { EngineClient, SlotData, TargetRequest, TradeQueryData, WithWarnings } from '@poe-upgrade-finder/engine-client';
+import { DEPTH_PER_BAND } from '@poe-upgrade-finder/core';
+import type { EngineClient, SlotData, TargetRequest, TradeQueryData } from '@poe-upgrade-finder/engine-client';
 import { budgetLabel, parseBudgetText } from '@poe-upgrade-finder/ipc';
 import type {
     Budget,
     BuildSettings,
     EquippedInfo,
     FeedEntry,
-    GearSlot,
-    SearchedStat,
-    WeightPreview,
     FeedLevel,
     LimitPanel,
     MainEvent,
@@ -60,21 +57,34 @@ import type {
 import type { JsonlLogger, Logger } from '@poe-upgrade-finder/logging';
 import type { FetchResponse, LimiterEvent, SearchResponse, TradePolicy, TradeSearchBody } from '@poe-upgrade-finder/trade';
 import { targetRequest } from '../services/build-summary.ts';
-import { generatorKey } from '../services/cache-db.ts';
-import type { CacheDb } from '../services/cache-db.ts';
-import { readSave } from '../services/engine-session.ts';
 import type { EngineSession, LoadedBuild } from '../services/engine-session.ts';
 import type { SettingsStore } from '../services/settings-store.ts';
+import { planSlotData } from '../services/slot-data.ts';
 import type { SlotDataService } from '../services/slot-data.ts';
+import type { UniqueService } from '../services/uniques.ts';
+import type { WeightService } from '../services/weights.ts';
 import type { TradeServices } from '../services/trade-services.ts';
 import { UserFacingError } from '../ui/ipc-server.ts';
 import { PauseGate } from './pause-gate.ts';
-import { engineAdapter, pruneRuns, writeRunRecord } from './shared.ts';
-import { NO_REVIEW, planReview, runSlotPlan } from './slot-pipeline.ts';
-import type { PlanReview, PreparedSlot, SlotPlanJob } from './slot-pipeline.ts';
-import { levelFilterLabel, limitPanel, toUiBand, toUiItem, toUiRunPlan, toUiSearch, toUiSummary } from './ui-mapping.ts';
+import { engineAdapter, planGear, pruneRuns, writeRunRecord } from './shared.ts';
+import { runSlotPlan } from './slot-pipeline.ts';
+import type { PreparedSlot, SlotPlanJob } from './slot-pipeline.ts';
+import {
+    emptyRunCauses,
+    hardNeedText,
+    levelFilterLabel,
+    limitPanel,
+    socketLabels,
+    toUiBand,
+    toUiItem,
+    toUiRunPlan,
+    toUiSearch,
+    toUiSummary,
+} from './ui-mapping.ts';
 import type { LimiterWait } from './ui-mapping.ts';
 import { messageOf, stackOf, toError } from '@poe-upgrade-finder/validate';
+import { isUniquePlan } from '@poe-upgrade-finder/vocab';
+import type { GearSlot, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 export interface RunControllerOptions {
     readonly userData: string;
@@ -86,8 +96,10 @@ export interface RunControllerOptions {
     /** The save's full path for a build id, or undefined when it isn't in the Builds folder. */
     readonly buildFile: (buildId: string) => string | undefined;
     readonly emit: (event: MainEvent) => void;
-    /** PoB's trade query per build, slot, target and blend (V23). */
-    readonly cache: CacheDb;
+    /** The weights per build, slot, target and blend (PoB's generator, or its cache). */
+    readonly weights: WeightService;
+    /** The uniques per build, slot, item type, target and blend, for unique runs (#113). */
+    readonly uniques: UniqueService;
     /** PoB's mods per item type, for slot plans. */
     readonly slotData: SlotDataService;
     /** Development (--replay): recorded listings instead of the trade site; no sign-in, a fixed divine rate. */
@@ -120,6 +132,8 @@ interface HeaderMeta {
     readonly catalog: ModCatalog | undefined;
     /** What the plan's check changed (a redundant exclude left out). */
     readonly planNotes: readonly string[];
+    /** A unique run's notes on hard needs it can't carry (#113). */
+    readonly uniqueNotes: readonly string[];
 }
 
 /**
@@ -152,7 +166,9 @@ function logPlan(log: Logger, plan: SlotPlan, prepared: PreparedSlot, chaosPerDi
         baseType: spec.baseType,
         requirements: spec.requirements.filter((r) => r.origin === 'plan'),
         exclusions: spec.exclusions,
+        modExclusions: spec.modExclusions,
         defences: spec.defences,
+        sockets: spec.sockets,
         influences: spec.influences,
         pruned: spec.pruned,
         maxLevelRequirement: spec.maxLevelRequirement ?? null,
@@ -307,123 +323,6 @@ export class RunController {
         }
     }
 
-    /** PoB's trade query for the loaded build: from the generator cache (V23), else generated and cached. */
-    private async pobQueryFor(
-        client: EngineClient,
-        loaded: LoadedBuild,
-        slot: GearSlot,
-        target: TargetRequest,
-        blend: number,
-        log: Logger,
-    ): Promise<{ readonly query: TradeQueryData; readonly cached: boolean }> {
-        const key: string = generatorKey({
-            xmlHash: loaded.xmlHash,
-            slot: slot,
-            target: target,
-            blend: blend,
-            pobVersion: loaded.load.pobVersion,
-        });
-        const cached: TradeQueryData | undefined = this.options.cache.generator(key);
-        if (cached !== undefined) {
-            log.log('info', 'trade query from the cache', { key: key });
-            return { query: cached, cached: true };
-        }
-        const fresh: WithWarnings<TradeQueryData> = await client.tradeQuery(slot, { target: target, ...generatorWeights(blend) });
-        if (fresh.queryError === undefined) {
-            this.options.cache.saveGenerator(key, fresh);
-        }
-        log.log('info', 'trade query generated', { key: key, seconds: fresh.seconds, warnings: fresh.warnings.length });
-        return { query: fresh, cached: false };
-    }
-
-    /**
-     * PoB's query from the generator cache for the save as it is on disk now, without waiting for PoB to load it:
-     * the same key the loaded path uses (save text, slot, target, blend, PoB version), so the answer is the same.
-     */
-    private queryFromCacheBeforeLoad(
-        file: string,
-        slot: GearSlot,
-        target: TargetRequest,
-        blend: number,
-        log: Logger,
-    ): { readonly query: TradeQueryData; readonly cached: boolean } | undefined {
-        const pobVersion: string | null = this.options.session.expectedPobVersion();
-        if (pobVersion === null) {
-            return undefined;
-        }
-        let xmlHash: string;
-        try {
-            xmlHash = readSave(file).xmlHash;
-        } catch {
-            return undefined;
-        }
-        const key: string = generatorKey({ xmlHash: xmlHash, slot: slot, target: target, blend: blend, pobVersion: pobVersion });
-        const cached: TradeQueryData | undefined = this.options.cache.generator(key);
-        if (cached === undefined) {
-            return undefined;
-        }
-        log.log('info', 'trade query from the cache', { key: key, beforeLoad: true });
-        return { query: cached, cached: true };
-    }
-
-    private async queryAfterLoad(
-        buildId: string,
-        file: string,
-        targetId: string,
-        slot: GearSlot,
-        target: TargetRequest,
-        blend: number,
-        log: Logger,
-    ): Promise<{ readonly query: TradeQueryData; readonly cached: boolean }> {
-        const loaded: LoadedBuild = await this.options.session.ensure(buildId, file, targetId);
-        return this.options.session.exclusive((client: EngineClient) => {
-            // Another build can load between ensure() and the lock: the query would be cached under this
-            // build's key but generated on the other one.
-            if (this.options.session.loaded !== loaded) {
-                throw new UserFacingError('The build changed while the weights were loading: pick it again.');
-            }
-            return this.pobQueryFor(client, loaded, slot, target, blend, log);
-        });
-    }
-
-    /** The slot data a non-empty plan needs (before the worker lock: getting it may take the lock itself). */
-    private async slotDataFor(plan: SlotPlan): Promise<SlotData | undefined> {
-        if (isEmptyPlan(plan) || plan.itemType === null) {
-            return undefined;
-        }
-        try {
-            return await this.options.slotData.get(plan.itemType);
-        } catch (error: unknown) {
-            throw new UserFacingError(`Couldn't read PoB's mods for ${plan.itemType}: ${messageOf(error)}`);
-        }
-    }
-
-    /**
-     * The weight review list for the Search view: PoB's weights for the build, slot and target, named. With a
-     * slot plan, also which of them the plan takes out and why, and whether the plan can be searched.
-     */
-    public async previewWeights(buildId: string, slot: GearSlot, targetId: string, plan: SlotPlan | null): Promise<WeightPreview> {
-        const file: string = this.requireBuildFile(buildId);
-        const settings: BuildSettings = this.options.store.buildSettings(buildId);
-        const catalog: ModCatalog | undefined = await this.options.trade.catalog(this.options.replay !== undefined);
-        const slotData: SlotData | undefined = plan === null ? undefined : await this.slotDataFor(plan);
-        const target: TargetRequest = targetRequest(targetId);
-        const log: Logger = this.options.logger.area('run');
-        const result: { readonly query: TradeQueryData; readonly cached: boolean } =
-            this.queryFromCacheBeforeLoad(file, slot, target, settings.blend, log) ??
-            (await this.queryAfterLoad(buildId, file, targetId, slot, target, settings.blend, log));
-        if (result.query.queryError !== undefined) {
-            throw new UserFacingError(`PoB couldn't build the search for ${slot}: ${result.query.queryError}`);
-        }
-        const label = (statId: string): string => catalog?.describe(statId) ?? statId;
-        const pobList: readonly WeightedStat[] = pobWeightList(result.query);
-        const weights: SearchedStat[] = [...pobList]
-            .sort((a: WeightedStat, b: WeightedStat) => b.weight - a.weight)
-            .map((w: WeightedStat) => ({ statId: w.statId, label: label(w.statId), weight: w.weight }));
-        const review: PlanReview = plan === null ? NO_REVIEW : planReview(plan, slotData, pobList, label);
-        return { buildId: buildId, slot: slot, target: targetId, weights: weights, ...review, cached: result.cached };
-    }
-
     /** Prepares the run (sign-in, rate, PoB) and starts it; resolves with its header once searching begins. */
     public async start(request: RunRequest): Promise<RunHeader> {
         if (this.busy) {
@@ -442,7 +341,7 @@ export class RunController {
         const replay = this.options.replay;
         await this.requireSignedIn();
         this.checkPrepCancelled(prep);
-        const chaosPerDivine: number | undefined = replay?.chaosPerDivine ?? (await trade.chaosPerDivine());
+        const chaosPerDivine: number | undefined = replay?.chaosPerDivine ?? (await trade.chaosPerDivine(prep.signal));
         this.checkPrepCancelled(prep);
         const budgetChaos: number = chaosOf(
             budget,
@@ -470,10 +369,13 @@ export class RunController {
             lastBudget: request.budget,
             lastMinBudget: request.minBudget === '' ? null : request.minBudget,
             lastTarget: request.target,
-            slotPlans: { ...settings.slotPlans, [slot]: plan },
+            // A unique run keeps the slot's rare plan as it was and remembers the pick instead (#113).
+            ...(isUniquePlan(plan)
+                ? { uniqueChoices: { ...settings.uniqueChoices, [slot]: { mode: 'unique', unique: plan.unique } } }
+                : { slotPlans: { ...settings.slotPlans, [slot]: plan } }),
         });
         const league: string = store.settings.league;
-        const slotData: SlotData | undefined = await this.slotDataFor(plan);
+        const slotData: SlotData | undefined = await planSlotData(this.options.slotData, plan);
         this.checkPrepCancelled(prep);
 
         // Names for PoB's weighted stats (the trade site's stat list, cached a week; never fetched in replay mode).
@@ -505,8 +407,24 @@ export class RunController {
                     floors: settings.floors,
                     weightEdits: settings.weightEdits[slot],
                     levelFilter: settings.levelFilter,
-                    pobQuery: async (c: EngineClient, s: GearSlot) =>
-                        (await this.pobQueryFor(c, loaded, s, target, settings.blend, runLog)).query,
+                    weights: async (c: EngineClient, s: GearSlot) =>
+                        (
+                            await this.options.weights.weightsFor(c, loaded, {
+                                slot: s,
+                                target: target,
+                                blend: settings.blend,
+                                source: 'pob',
+                            })
+                        ).query,
+                    uniques: async (c: EngineClient, s: GearSlot, itemType: string) =>
+                        (
+                            await this.options.uniques.uniquesFor(c, loaded, {
+                                slot: s,
+                                itemType: itemType,
+                                target: target,
+                                blend: settings.blend,
+                            })
+                        ).data,
                     checkpoint: () => {
                         this.checkPrepCancelled(prep);
                     },
@@ -537,6 +455,7 @@ export class RunController {
                                 startedMs,
                                 catalog,
                                 planNotes: prepared.check.notes.map((n) => n.text),
+                                uniqueNotes: prepared.uniqueNotes,
                             },
                             setup,
                         );
@@ -768,10 +687,11 @@ export class RunController {
             currentView: loaded.summary.equipped.find((e: EquippedInfo) => e.slot === spec.slot)?.view ?? null,
             weightedStats: spec.weights.length,
             // The build's hard needs only: the plan's includes are in `plan`.
-            hardNeeds: spec.requirements
-                .filter((r) => r.origin === 'strip')
-                .map((r) => r.label.replace(/^Required: /, '').replace(/, from strip$/, '')),
-            plan: toUiRunPlan(setup.plan, spec, meta.planNotes),
+            hardNeeds: spec.requirements.filter((r) => r.origin === 'strip').map(hardNeedText),
+            plan: isUniquePlan(setup.plan) ? null : toUiRunPlan(setup.plan, spec, meta.planNotes),
+            unique: spec.unique?.name ?? null,
+            uniqueNotes: meta.uniqueNotes,
+            sockets: socketLabels(spec.sockets),
             levelFilter: levelFilterLabel(settings.levelFilter, spec.maxLevelRequirement),
             searchedFor: [...spec.weights]
                 .sort((a: WeightedStat, b: WeightedStat) => b.weight - a.weight)
@@ -790,14 +710,18 @@ export class RunController {
         const needs: string = header.hardNeeds.length > 0 ? `, needs ${header.hardNeeds.join(', ')}` : '';
         this.feed(state, 'info', `Searching ${header.slot}: ${spec.weights.length} weighted stats from PoB${needs}.`);
         const included: number = spec.requirements.filter((r) => r.origin === 'plan').length;
-        if (spec.baseType !== null || included > 0 || spec.exclusions.length > 0 || spec.defences.length > 0) {
+        const excluded: number = spec.exclusions.length + spec.modExclusions.length;
+        if (spec.baseType !== null || included > 0 || excluded > 0 || spec.defences.length > 0 || spec.sockets.length > 0) {
             const parts: string[] = [];
             if (spec.baseType !== null) {
                 parts.push(spec.baseType);
             }
-            parts.push(`${included} included stat${included === 1 ? '' : 's'}`, `${spec.exclusions.length} excluded`);
+            parts.push(`${included} included stat${included === 1 ? '' : 's'}`, `${excluded} excluded`);
             if (spec.defences.length > 0) {
                 parts.push(spec.defences.map((d) => d.label.replace(/, from plan$/, '')).join(', '));
+            }
+            if (spec.sockets.length > 0) {
+                parts.push(socketLabels(spec.sockets).join(', '));
             }
             if (spec.influences.length > 0) {
                 parts.push(`influence: ${spec.influences.join(', ')}`);
@@ -811,15 +735,26 @@ export class RunController {
 
     /** What runSlotSearch and deepenSlotSearch share: the spec, the build's baseline and the user's settings. */
     private searchOptions(state: RunState, setup: RunSetup): SlotRunInput {
+        const gear: PlanGear = planGear(setup.loaded.load.equipped);
+        // Weapon 2 listings PoB won't equip are measured against Weapon 1 (#39).
+        const besides: string | undefined =
+            setup.spec.slot !== 'Weapon 2'
+                ? undefined
+                : gear.weapon1Type === null
+                  ? 'beside an empty Weapon 1'
+                  : `beside a ${gear.weapon1Type}`;
         return {
+            ...(besides === undefined ? {} : { besides: besides }),
             league: state.header.league,
             spec: setup.spec,
+            emptyCauses: emptyRunCauses(setup.spec),
             baseline: setup.loaded.stats,
             blend: setup.settings.blend,
             depth: state.header.perBand,
             chaosPerDivine: setup.chaosPerDivine,
             value: { minGainPct: setup.settings.minGainPct },
             signal: state.abort.signal,
+            offHand: offHandName(gear.weapon2Type ?? undefined),
         };
     }
 
@@ -961,6 +896,10 @@ export class RunController {
             }
             case 'warning':
                 this.feed(state, 'warn', event.message);
+                break;
+            case 'note':
+                this.feed(state, 'info', event.message);
+                runLog.log('info', 'note', { message: event.message });
                 break;
             case 'item-failed':
                 this.feed(state, 'warn', `PoB couldn't score a listing: ${event.message}`, { id: event.listingId, message: event.message });

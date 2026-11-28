@@ -54,15 +54,23 @@ export function optional<T>(value: unknown, path: string, read: (v: unknown, p: 
     return value === undefined || value === null ? undefined : read(value, path);
 }
 
-/** An array. The engine encodes an empty array as {} when it can't tell, so an empty object is accepted too. */
+/** An array, strictly: an empty object is an error (a trade search's `result: {}` is not zero listings). */
 export function array<T>(value: unknown, path: string, read: (v: unknown, p: string) => T): readonly T[] {
-    if (isRecord(value) && Object.keys(value).length === 0) {
-        return [];
-    }
     if (!Array.isArray(value)) {
         throw new ValidationError(`${path}: expected an array, got ${describe(value)}`);
     }
     return value.map((item: unknown, i: number) => read(item, `${path}[${i}]`));
+}
+
+/**
+ * An array from the PoB engine (Lua), whose JSON encoder writes an empty table as {}: an empty object reads
+ * as []. Opt-in, for engine messages only; everything else uses array().
+ */
+export function luaArray<T>(value: unknown, path: string, read: (v: unknown, p: string) => T): readonly T[] {
+    if (isRecord(value) && Object.keys(value).length === 0) {
+        return [];
+    }
+    return array(value, path, read);
 }
 
 export function oneOf<T extends string>(value: unknown, path: string, allowed: readonly T[]): T {

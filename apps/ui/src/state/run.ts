@@ -5,6 +5,7 @@ import type { Signal } from '@preact/signals';
 import type { LimitPanel, RunEventUi, RunHeader, RunRequest, RunSnapshot } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import { notify } from './notices.ts';
 
 export const run: Signal<RunSnapshot | null> = signal<RunSnapshot | null>(null);
 export const limits: Signal<LimitPanel | null> = signal<LimitPanel | null>(null);
@@ -20,6 +21,7 @@ export async function loadRun(): Promise<void> {
         limits.value = panel;
     } catch (error: unknown) {
         console.warn('could not load the run', messageOf(error));
+        notify('warn', `Couldn't load the last run: ${messageOf(error)}`);
     }
 }
 
@@ -48,16 +50,25 @@ export async function deepenRun(runId: string): Promise<void> {
     }
 }
 
+/** A run control (pause, resume, cancel); a failure says so on screen. */
+async function control(method: 'run.pause' | 'run.resume' | 'run.cancel', what: string): Promise<void> {
+    try {
+        await call(method, {});
+    } catch (error: unknown) {
+        notify('error', `Couldn't ${what} the run: ${messageOf(error)}`, { key: 'run-control' });
+    }
+}
+
 export function pauseRun(): void {
-    void call('run.pause', {});
+    void control('run.pause', 'pause');
 }
 
 export function resumeRun(): void {
-    void call('run.resume', {});
+    void control('run.resume', 'resume');
 }
 
 export function cancelRun(): void {
-    void call('run.cancel', {});
+    void control('run.cancel', 'cancel');
 }
 
 export async function openBuyLink(runId: string, itemId: string): Promise<void> {

@@ -1,14 +1,22 @@
 export { keepHeader, nodeFetchTransport, pickHeaders } from './http.ts';
 export type { HttpMethod, HttpOutcome, HttpRequest, HttpTransport } from './http.ts';
 export { readFetchResponse, readListing, readSearchResponse, readSiteError, STAT_LINE_KINDS, stripNote, stripTokens } from './listing.ts';
-export { DISPLAY_RARITIES, ICON_ORIGIN, INFLUENCES, MOD_KINDS, propertyLine, readItemDisplay, stripMarkup } from './item-display.ts';
-export type { DisplayLine, DisplayMod, DisplayPart, DisplayRarity, DisplayTone, Influence, ItemDisplay, ModKind } from './item-display.ts';
-export type { FetchResponse, ListingPrice, MalformedListing, SearchResponse, StatLine, StatLineKind, TradeListing } from './listing.ts';
+export { propertyLine, readItemDisplay, stripMarkup } from './item-display.ts';
 export type {
-    ListingStatus,
+    FetchResponse,
+    ListingPrice,
+    MalformedListing,
+    SearchResponse,
+    StatLine,
+    StatLineKind,
+    StatSource,
+    TradeListing,
+} from './listing.ts';
+export type {
     PriceFilter,
     PriceOption,
     SearchFilters,
+    SearchRarityOption,
     SearchQuery,
     StatFilter,
     StatFilterValue,

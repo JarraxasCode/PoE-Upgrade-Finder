@@ -3,13 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "The IPC contract between the main process and the renderer: methods, events, and the runtime checks on what the renderer sends.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
   },
   "dependencies": {
-    "@poe-upgrade-finder/validate": "0.1.0"
+    "@poe-upgrade-finder/validate": "0.1.0",
+    "@poe-upgrade-finder/vocab": "0.1.0"
   },
   "scripts": {
     "typecheck": "tsc -p tsconfig.json"

@@ -4,7 +4,7 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import type { ItemView } from '@poe-upgrade-finder/ipc';
+import type { ItemView } from '@poe-upgrade-finder/vocab';
 
 export type TipContent =
     | { readonly kind: 'item'; readonly view: ItemView }

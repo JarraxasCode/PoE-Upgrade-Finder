@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Spawns and talks to the headless PoB engine (engine/lua dispatcher on luahost.exe) over stdio JSON lines.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"
@@ -13,6 +13,7 @@
     "test": "node --test \"test/**/*.test.ts\""
   },
   "dependencies": {
-    "@poe-upgrade-finder/validate": "0.1.0"
+    "@poe-upgrade-finder/validate": "0.1.0",
+    "@poe-upgrade-finder/vocab": "0.1.0"
   }
 }

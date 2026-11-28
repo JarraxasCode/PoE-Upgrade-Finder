@@ -6,6 +6,7 @@ import { go, route } from './router.ts';
 import type { Route } from './routes.ts';
 import { AccountBadge } from './views/account-badge.tsx';
 import { ItemTip } from './views/item-card.tsx';
+import { Notices } from './views/notices.tsx';
 import { RunView } from './views/run-view.tsx';
 import { SearchView } from './views/search-view.tsx';
 import { SettingsView } from './views/settings-view.tsx';
@@ -67,6 +68,7 @@ export function App(): JSX.Element {
                 <CurrentView />
             </main>
             <ItemTip />
+            <Notices />
         </div>
     );
 }

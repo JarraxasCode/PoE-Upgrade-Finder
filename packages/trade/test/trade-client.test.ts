@@ -50,7 +50,7 @@ const BODY: TradeSearchBody = {
         status: { option: 'securable' },
         stats: [{ type: 'weight', filters: [{ id: 'pseudo.pseudo_total_life', value: { weight: 1 } }] }],
         filters: {
-            type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'nonunique' } } },
+            type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'rare' } } },
             trade_filters: { filters: { price: { max: 5, option: 'chaos' } } },
         },
     },
@@ -80,8 +80,10 @@ test('fetch joins up to 10 ids, passes the query id and keeps the requested orde
         result.listings.map((l: { readonly id: string }) => l.id),
         ['a', 'b'],
     );
-    assert.throws(() => r.client.fetch([]), RangeError);
-    assert.throws(() => r.client.fetch(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']), RangeError);
+    // A rejection, not a synchronous throw from a promise method.
+    const none: Promise<FetchResponse> = r.client.fetch([]);
+    await assert.rejects(none, RangeError);
+    await assert.rejects(r.client.fetch(['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11']), RangeError);
 });
 
 test('"Query is too complex" is a site error with the site code, not retried', async () => {
@@ -174,4 +176,15 @@ test('pickHeaders keeps only rate-limit, Retry-After and cf-mitigated headers', 
         ['Authorization', 'Bearer x'],
     ]);
     assert.deepEqual(picked, { 'x-rate-limit-rules': 'Account,Ip', 'retry-after': '5', 'cf-mitigated': 'challenge' });
+});
+
+test('a second 429 in a row is a rate-limited error, not another retry (issue #79)', async () => {
+    const limited = (): HttpOutcome =>
+        response(429, searchHeaders(3, 3, { 'retry-after': '20' }), { error: { code: 3, message: 'Rate limit exceeded' } });
+    const r: Rig = rig([limited(), limited()]);
+    await assert.rejects(
+        r.client.search('Covens', BODY),
+        (error: unknown) => error instanceof TradeError && error.code === 'rate-limited' && error.status === 429,
+    );
+    assert.equal(r.transport.requests.length, 2);
 });

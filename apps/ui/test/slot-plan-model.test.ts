@@ -1,10 +1,10 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { emptySlotPlan } from '@poe-upgrade-finder/ipc';
-import type { ModOption, ModPick, SlotEditorData, SlotPlan, StatOption } from '@poe-upgrade-finder/ipc';
+import type { BaseOption, ModOption, SlotEditorData, StatOption } from '@poe-upgrade-finder/ipc';
 import {
     conflictOf,
     editorItemType,
+    emptyRows,
     fuzzyScore,
     kindLabel,
     excludeRows,
@@ -15,7 +15,9 @@ import {
     parseRoll,
     pickOf,
     pickProblem,
+    planAffixes,
     planOptions,
+    rowLimit,
     statBounds,
     withBase,
     withItemType,
@@ -25,6 +27,8 @@ import {
     withRule,
 } from '../src/slot-plan-model.ts';
 import type { PlanOption } from '../src/slot-plan-model.ts';
+import { emptySlotPlan, PLAIN_AFFIXES } from '@poe-upgrade-finder/vocab';
+import type { BaseAffixes, ModPick, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const ES: string = 'explicit.stat_4015621042';
 const STUN: string = 'explicit.stat_2511217560';
@@ -120,6 +124,7 @@ const DATA: SlotEditorData = {
             defences: { energyShield: [42, 51] },
             implicits: [],
             influences: ['shaper', 'elder'],
+            affixes: PLAIN_AFFIXES,
             icon: null,
         },
         {
@@ -129,6 +134,7 @@ const DATA: SlotEditorData = {
             defences: { evasion: [228, 262] },
             implicits: [],
             influences: ['shaper', 'elder'],
+            affixes: PLAIN_AFFIXES,
             icon: null,
         },
         {
@@ -143,6 +149,7 @@ const DATA: SlotEditorData = {
                 },
             ],
             influences: [],
+            affixes: PLAIN_AFFIXES,
             icon: null,
         },
     ],
@@ -196,10 +203,16 @@ test('conflicts: already picked, same group, include vs exclude, influences, eld
     assert.match(conflictOf(OPTIONS, plan, find('#% increased Energy Shield (Shaper)'), 'include', null) ?? '', /Same mod group/);
     // An exclude isn't held to the group rule, but can't exclude what's included.
     assert.equal(conflictOf(OPTIONS, plan, find('#% increased Energy Shield (Shaper)'), 'exclude', null), undefined);
-    assert.match(
-        conflictOf(OPTIONS, plan, find('#% increased Energy Shield / #% increased Stun and Block Recovery'), 'exclude', null) ?? '',
-        /includes this stat/,
+    // A hybrid exclude drops only that mod after the fetch (#38), so ES% from the pure mod still meets the include.
+    assert.equal(
+        conflictOf(OPTIONS, plan, find('#% increased Energy Shield / #% increased Stun and Block Recovery'), 'exclude', null),
+        undefined,
     );
+    // But not when an include's mod carries every stat of the hybrid exclude.
+    const hybridIn: SlotPlan = planWith(pickOf(find('#% increased Energy Shield / #% increased Stun and Block Recovery'), 'include'));
+    assert.match(conflictOf(OPTIONS, hybridIn, find('#% increased Energy Shield'), 'exclude', null) ?? '', /includes this stat/);
+    const hybridOut: SlotPlan = planWith(pickOf(find('#% increased Energy Shield / #% increased Stun and Block Recovery'), 'exclude'));
+    assert.equal(conflictOf(OPTIONS, hybridOut, find('#% increased Energy Shield'), 'include', null), undefined);
     // The hybrid carries ES too, but it's another group: it may be the mod that meets the include.
     assert.equal(
         conflictOf(OPTIONS, plan, find('#% increased Energy Shield / #% increased Stun and Block Recovery'), 'include', null),
@@ -267,9 +280,34 @@ test('rolls typed', () => {
 
 test('edits: type, base, picks, rule, range', () => {
     const empty: SlotPlan = emptySlotPlan('Weapon 1');
-    assert.equal(editorItemType('Weapon 1', empty, 'One Handed Sword'), 'One Handed Sword');
-    assert.equal(editorItemType('Weapon 1', empty, 'Fishing Rod'), 'Bow', "a type the slot can't hold falls back to the slot's first");
-    assert.equal(editorItemType('Weapon 1', { ...empty, itemType: 'Bow' }, 'One Handed Sword'), 'Bow');
+    assert.equal(editorItemType('Weapon 1', empty, 'One Handed Sword', 'One Handed Sword'), 'One Handed Sword');
+    assert.equal(
+        editorItemType('Weapon 1', empty, 'Fishing Rod', 'Fishing Rod'),
+        'Any weapon',
+        "a type the slot can't hold falls back to the slot's first",
+    );
+    assert.equal(editorItemType('Weapon 1', empty, null, null), 'One-handed weapon', "an empty Weapon 1: PoB's own weapon.one");
+    assert.equal(editorItemType('Weapon 1', { ...empty, itemType: 'Bow' }, 'One Handed Sword', 'One Handed Sword'), 'Bow');
+    // Weapon 2 offers what fits beside Weapon 1 (#39): beside a bow, a quiver; beside a wand, a shield first.
+    const offHand: SlotPlan = emptySlotPlan('Weapon 2');
+    assert.equal(editorItemType('Weapon 2', offHand, null, 'Bow'), 'Quiver');
+    assert.equal(editorItemType('Weapon 2', offHand, null, 'Wand'), 'Shield');
+    assert.equal(editorItemType('Weapon 2', offHand, 'Wand', 'Wand'), 'Wand');
+    assert.equal(
+        editorItemType('Weapon 2', offHand, 'One Handed Sword', 'Wand'),
+        'Shield',
+        "an equipped type that doesn't fit isn't offered",
+    );
+    assert.equal(
+        editorItemType('Weapon 2', { ...offHand, itemType: 'Quiver' }, null, 'Wand'),
+        'Quiver',
+        "a saved plan's type shows, to be fixed",
+    );
+
+    // A generic weapon type (#39) always stays in the plan, even with nothing else and Weapon 1 empty: an empty plan
+    // would search PoB's own category instead.
+    assert.equal(withItemType(emptySlotPlan('Weapon 1'), 'Any weapon', null).itemType, 'Any weapon');
+    assert.equal(withItemType(emptySlotPlan('Weapon 1'), 'One-handed weapon', 'Wand').itemType, 'One-handed weapon');
 
     // Picking the equipped type with nothing else stays an empty plan (searches as v0.1).
     assert.equal(withItemType(empty, 'One Handed Sword', 'One Handed Sword').itemType, null);
@@ -339,4 +377,51 @@ test("listing: the trade site's order (rank), other sources grouped at the botto
     assert.deepEqual(listed, ['popular stat', 'rare stat', 'unranked stat', 'bench stat', 'veiled stat']);
     assert.equal(options.find((o) => o.text === 'popular stat')?.source, 'natural');
     assert.equal(kindLabel(options.find((o) => o.text === 'bench stat') ?? assert.fail()), 'Crafted prefix');
+});
+
+// Bases with other affix limits (issue #37), as main sends them (core's baseAffixes on PoB's implicit lines).
+const HELICAL: BaseAffixes = { limits: { prefix: 1, suffix: 4 }, magnitudes: { prefix: 0, suffix: 50 } };
+const RATCHETING: BaseAffixes = { limits: { prefix: 0, suffix: 6 }, magnitudes: { prefix: 0, suffix: 0 } };
+
+test('bounds on a base with a magnitude bonus: the suffix side raised by 50%, a valid min no longer warned', () => {
+    const cold = find('+#% to Cold Resistance').stats[0];
+    assert.ok(cold);
+    assert.deepEqual(statBounds(OPTIONS, cold), { low: 6, high: 48 });
+    // Helical Ring: "50% increased Suffix Modifier magnitudes".
+    assert.deepEqual(statBounds(OPTIONS, cold, HELICAL), { low: 6, high: 72 });
+    // A prefix stat isn't raised by a suffix bonus, but counts only the base's one prefix (99, not 99 + 1).
+    const life = find('+# to maximum Life').stats[0];
+    assert.ok(life);
+    assert.deepEqual(statBounds(OPTIONS, life), { low: 1, high: 100 });
+    assert.deepEqual(statBounds(OPTIONS, life, HELICAL), { low: 1, high: 99 });
+});
+
+test("rows follow the base's limits: 3 shown, then a spare while it takes more; none on a side it lacks", () => {
+    assert.equal(rowLimit('suffix'), 3);
+    assert.equal(rowLimit('suffix', HELICAL), 4);
+    assert.equal(rowLimit('prefix', RATCHETING), 0);
+    // A plain base: 3 empty rows, none once full.
+    assert.equal(emptyRows('suffix', 0), 3);
+    assert.equal(emptyRows('suffix', 3), 0);
+    // Helical: 3 rows, then one spare for the fourth suffix.
+    assert.equal(emptyRows('suffix', 0, HELICAL), 3);
+    assert.equal(emptyRows('suffix', 3, HELICAL), 1);
+    assert.equal(emptyRows('suffix', 4, HELICAL), 0);
+    assert.equal(emptyRows('prefix', 0, HELICAL), 1);
+    assert.equal(emptyRows('prefix', 0, RATCHETING), 0);
+});
+
+test("the plan's affixes: the chosen base's, or the most any base of the type takes", () => {
+    const rings: SlotEditorData = {
+        ...DATA,
+        itemType: 'Ring',
+        bases: [
+            { ...(DATA.bases[0] as BaseOption), name: 'Iron Ring', affixes: PLAIN_AFFIXES },
+            { ...(DATA.bases[0] as BaseOption), name: 'Helical Ring', affixes: HELICAL },
+            { ...(DATA.bases[0] as BaseOption), name: 'Ratcheting Ring', affixes: RATCHETING },
+        ],
+    };
+    assert.deepEqual(planAffixes(rings, 'Helical Ring'), HELICAL);
+    assert.deepEqual(planAffixes(rings, null), { limits: { prefix: 3, suffix: 6 }, magnitudes: { prefix: 0, suffix: 50 } });
+    assert.deepEqual(planAffixes(rings, 'Unknown Ring'), PLAIN_AFFIXES);
 });

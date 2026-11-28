@@ -3,9 +3,9 @@
 
 import { writeFileSync } from 'node:fs';
 import { EngineClient, luahostCommand, pinnedPobDir, POB_DIR_ENV, resolveEnginePaths } from '@poe-upgrade-finder/engine-client';
-import type { GearSlot } from '@poe-upgrade-finder/ipc';
-import { GEAR_SLOTS } from '@poe-upgrade-finder/ipc';
 import { slotEditorData } from '../../apps/desktop/src/services/slot-data.ts';
+import { GEAR_SLOTS } from '@poe-upgrade-finder/vocab';
+import type { GearSlot } from '@poe-upgrade-finder/vocab';
 
 const [itemType, slotArg, out, base] = process.argv.slice(2);
 const slot: GearSlot | undefined = GEAR_SLOTS.find((s: GearSlot) => s === slotArg);

@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "description": "Runtime checks for JSON at the boundaries (engine messages, trade responses, currency digests).",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts"

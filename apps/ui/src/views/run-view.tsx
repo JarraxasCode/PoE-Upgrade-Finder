@@ -4,8 +4,7 @@
 
 import { useState } from 'preact/hooks';
 import type { JSX } from 'preact';
-import type { FeedEntry, HiddenReason, RunHeader, RunSnapshot, RunSummaryUi, SearchedStat, UiItem } from '@poe-upgrade-finder/ipc';
-import { HIDDEN_REASONS } from '@poe-upgrade-finder/ipc';
+import type { FeedEntry, RunHeader, RunSnapshot, RunSummaryUi, SearchedStat, UiItem } from '@poe-upgrade-finder/ipc';
 import { compact, signedPct } from '../format.ts';
 import { bestPerBand, chartModel } from '../chart-model.ts';
 import type { BandBest, ChartModel } from '../chart-model.ts';
@@ -14,13 +13,26 @@ import { HoverItem, Info, ItemImage } from './item-card.tsx';
 import { Orb } from './price.tsx';
 import { LimitsStrip } from './limits.tsx';
 import { PriceGainChart } from './price-gain-chart.tsx';
-import { bandRows, byGain, goodFinds, HIDDEN_LABELS, hiddenCounts, isLive, liveFiltered, progress, slotWasEmpty } from '../run-model.ts';
+import {
+    bandRows,
+    byGain,
+    goodFinds,
+    HIDDEN_LABELS,
+    hiddenCounts,
+    isLive,
+    liveFiltered,
+    progress,
+    skippedText,
+    slotWasEmpty,
+} from '../run-model.ts';
 import type { BandRow } from '../run-model.ts';
 import { openLogLine } from '../state/log-focus.ts';
 import { cancelRun, deepening, deepenRun, pauseRun, resumeRun, run } from '../state/run.ts';
 import { gainText, tone, GainKey, ItemList } from './run-items.tsx';
 import { Verdict } from './run-verdict.tsx';
 import { RunPlanSummary } from './plan-checks.tsx';
+import { JUNK_REASONS } from '@poe-upgrade-finder/vocab';
+import type { JunkReason } from '@poe-upgrade-finder/vocab';
 
 // Side panels ----------------------------------------------------------------------------------------------
 
@@ -124,9 +136,26 @@ function SearchedFor(props: { readonly header: RunHeader }): JSX.Element {
     return (
         <div class="card side">
             <h2>What it searched for</h2>
-            <RunPlanSummary header={h} />
+            {h.unique !== null ? (
+                <p class="run-plan small">
+                    <strong>Unique:</strong> {h.unique}
+                </p>
+            ) : (
+                <RunPlanSummary header={h} />
+            )}
             {h.hardNeeds.length > 0 && <p class="small">Build needs: {h.hardNeeds.join(', ')}</p>}
-            <p class="muted small">PoB's weights for this build, heaviest first. Listings are ranked by the weighted sum of these.</p>
+            {h.uniqueNotes.map((n: string) => (
+                <p key={n} class="small warn">
+                    {n}
+                </p>
+            ))}
+            <p class="muted small">
+                {h.unique !== null
+                    ? h.searchedFor.length > 0
+                        ? `How much each of ${h.unique}'s rolling lines is worth to this build, heaviest first. Listings are ranked by the weighted sum of these.`
+                        : `None of ${h.unique}'s rolling lines changes this build, so the cheapest copies are searched first.`
+                    : "PoB's weights for this build, heaviest first. Listings are ranked by the weighted sum of these."}
+            </p>
             <ul class="searched">
                 {shown.map((s: SearchedStat) => (
                     <li key={s.statId} title={s.statId}>
@@ -312,7 +341,7 @@ function BestPerBand(props: {
     );
 }
 
-type Group = 'shown' | HiddenReason | 'all';
+type Group = 'shown' | JunkReason | 'all';
 
 function Done(props: { readonly snap: RunSnapshot; readonly summary: RunSummaryUi }): JSX.Element {
     const { snap, summary } = props;
@@ -322,7 +351,7 @@ function Done(props: { readonly snap: RunSnapshot; readonly summary: RunSummaryU
     const pick: UiItem | undefined = summary.pickId === null ? undefined : byId.get(summary.pickId);
     const best: UiItem | undefined = summary.bestId === null ? undefined : byId.get(summary.bestId);
     const shown: UiItem[] = summary.items.filter((i: UiItem) => i.hidden === null).sort(byGain);
-    const counts: Map<HiddenReason, number> = hiddenCounts(summary.items);
+    const counts: Map<JunkReason, number> = hiddenCounts(summary.items);
     const tags: Map<string, string> = new Map<string, string>();
     if (pick !== undefined) {
         tags.set(pick.id, 'Pick');
@@ -340,6 +369,7 @@ function Done(props: { readonly snap: RunSnapshot; readonly summary: RunSummaryU
               ? [...summary.items].sort(byGain)
               : summary.items.filter((i: UiItem) => i.hidden === group).sort(byGain);
     const c = summary.counts;
+    const skipped: string | null = skippedText(c.skippedBy, c.excludedMods);
     const chart: ChartModel | null = chartModel(summary.items, h);
     return (
         <>
@@ -372,10 +402,11 @@ function Done(props: { readonly snap: RunSnapshot; readonly summary: RunSummaryU
                         <span class="kpi-label">run time</span>
                     </div>
                 </div>
-                {(c.failed > 0 || c.missing > 0) && (
+                {(c.failed > 0 || c.missing > 0 || skipped !== null) && (
                     <p class="small">
                         {c.failed > 0 && <span class="warn">{c.failed} PoB couldn't score. </span>}
-                        {c.missing > 0 && <span class="muted">{c.missing} gone before the fetch.</span>}
+                        {c.missing > 0 && <span class="muted">{c.missing} gone before the fetch. </span>}
+                        {skipped !== null && <span class={c.skippedBy['not-for-slot'] > 0 ? 'warn' : 'muted'}>{skipped}</span>}
                     </p>
                 )}
                 <div class="groups" role="tablist" aria-label="Which items">
@@ -390,7 +421,7 @@ function Done(props: { readonly snap: RunSnapshot; readonly summary: RunSummaryU
                     >
                         Worth a look ({shown.length})
                     </button>
-                    {HIDDEN_REASONS.filter((r: HiddenReason) => (counts.get(r) ?? 0) > 0).map((r: HiddenReason) => (
+                    {JUNK_REASONS.filter((r: JunkReason) => (counts.get(r) ?? 0) > 0).map((r: JunkReason) => (
                         <button
                             key={r}
                             type="button"

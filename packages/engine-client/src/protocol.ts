@@ -1,32 +1,14 @@
 // Types for the engine protocol (engine/README.md, "The dispatcher") and runtime validation of every
 // message that comes in. Non-finite numbers arrive as strings and are decoded to JS numbers here.
 
-import { array, boolean, isRecord, number, oneOf, optional, ProtocolError, record, string } from './check.ts';
+import { boolean, isRecord, luaArray, number, oneOf, optional, ProtocolError, record, string } from './check.ts';
 import type { JsonRecord } from './check.ts';
 import { isEngineNumber, isEngineValue, toNumber } from './values.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import { ITEM_INFLUENCES, ITEM_MOD_KINDS, ITEM_RARITIES, ITEM_TONES } from '@poe-upgrade-finder/vocab';
+import type { ItemMod, ItemPart, ItemView } from '@poe-upgrade-finder/vocab';
 
 // Requests ----------------------------------------------------------------------------------------------
-
-/** The rare gear slots v1 searches. The engine accepts any PoB item slot; the app only uses these. */
-export type GearSlot = 'Helmet' | 'Body Armour' | 'Gloves' | 'Boots' | 'Amulet' | 'Ring 1' | 'Ring 2' | 'Belt' | 'Weapon 1' | 'Weapon 2';
-
-export const GEAR_SLOTS: readonly GearSlot[] = [
-    'Helmet',
-    'Body Armour',
-    'Gloves',
-    'Boots',
-    'Amulet',
-    'Ring 1',
-    'Ring 2',
-    'Belt',
-    'Weapon 1',
-    'Weapon 2',
-];
-
-export function isGearSlot(value: string): value is GearSlot {
-    return GEAR_SLOTS.some((s: GearSlot) => s === value);
-}
 
 /** A damage target as requested. Indices are 1-based, as in PoB. */
 export type TargetRequest =
@@ -34,7 +16,8 @@ export type TargetRequest =
     | { readonly kind: 'fullDps' }
     | { readonly kind: 'skill'; readonly group: number; readonly activeSkill: number; readonly part?: number };
 
-export type CommandName = 'ping' | 'loadBuild' | 'stats' | 'strip' | 'tradeQuery' | 'score' | 'baseTypes' | 'slotData' | 'shutdown';
+export type CommandName =
+    'ping' | 'loadBuild' | 'stats' | 'strip' | 'tradeQuery' | 'score' | 'baseTypes' | 'slotData' | 'uniques' | 'shutdown';
 
 // Messages ----------------------------------------------------------------------------------------------
 
@@ -118,7 +101,7 @@ export function parseMessage(line: string): EngineMessage {
         ok: ok,
         data: m['data'],
         error: ok ? undefined : readErrorInfo(m['error'], 'message.error'),
-        warnings: array(m['warnings'], 'message.warnings', readWarning),
+        warnings: luaArray(m['warnings'], 'message.warnings', readWarning),
     };
 }
 
@@ -184,37 +167,10 @@ export interface EquippedItem extends ItemInfo {
     readonly view: PobItemView | undefined;
 }
 
-export type PobTone = 'plain' | 'augmented' | 'unmet' | 'fire' | 'cold' | 'lightning' | 'chaos' | 'label';
-const POB_TONES: readonly PobTone[] = ['plain', 'augmented', 'unmet', 'fire', 'cold', 'lightning', 'chaos', 'label'];
-export type PobModKind = 'enchant' | 'implicit' | 'explicit' | 'crafted' | 'fractured' | 'scourge' | 'crucible';
-const POB_MOD_KINDS: readonly PobModKind[] = ['enchant', 'implicit', 'explicit', 'crafted', 'fractured', 'scourge', 'crucible'];
-export type PobRarity = 'normal' | 'magic' | 'rare' | 'unique' | 'other';
-const POB_RARITIES: readonly PobRarity[] = ['normal', 'magic', 'rare', 'unique', 'other'];
-export type PobInfluence = 'shaper' | 'elder' | 'crusader' | 'redeemer' | 'hunter' | 'warlord' | 'searing' | 'tangled';
-const POB_INFLUENCES: readonly PobInfluence[] = ['shaper', 'elder', 'crusader', 'redeemer', 'hunter', 'warlord', 'searing', 'tangled'];
-
-export interface PobViewPart {
-    readonly text: string;
-    readonly tone: PobTone;
-}
-
-/** An equipped item's tooltip groups, as PoB's own tooltip has them. The app adds the image. */
-export interface PobItemView {
-    readonly rarity: PobRarity;
-    readonly name: string;
-    readonly typeLine: string;
+/** An equipped item's tooltip groups, as PoB's own tooltip has them: the tooltip's item without the image, which the app adds. */
+export interface PobItemView extends Omit<ItemView, 'icon' | 'width' | 'height'> {
     /** The base type without PoB's "(...)" suffixes: the key for the item's art. */
     readonly baseName: string;
-    readonly influences: readonly PobInfluence[];
-    readonly properties: readonly (readonly PobViewPart[])[];
-    readonly requirements: readonly PobViewPart[];
-    readonly sockets: string;
-    readonly itemLevel: number | null;
-    readonly enchants: readonly { readonly text: string; readonly kind: PobModKind }[];
-    readonly implicits: readonly { readonly text: string; readonly kind: PobModKind }[];
-    readonly explicits: readonly { readonly text: string; readonly kind: PobModKind }[];
-    readonly corrupted: boolean;
-    readonly mirrored: boolean;
 }
 
 export interface BuildInfo {
@@ -240,8 +196,23 @@ export interface StatsData {
     readonly stats: StatBlock;
 }
 
+/** What the slot's item carries itself, from PoB's parsed mods (#34): the site's pseudo totals for it. */
+export interface StripItemTotals {
+    readonly Chaos?: number;
+    readonly Fire?: number;
+    readonly Cold?: number;
+    readonly Lightning?: number;
+    readonly Str?: number;
+    readonly Dex?: number;
+    readonly Int?: number;
+}
+
+const ITEM_TOTAL_KEYS: readonly (keyof StripItemTotals)[] = ['Chaos', 'Fire', 'Cold', 'Lightning', 'Str', 'Dex', 'Int'];
+
 export interface StripData extends StatsData {
     readonly slot: string;
+    /** Undefined for an empty slot. */
+    readonly itemTotals: StripItemTotals | undefined;
 }
 
 export interface ModWeight {
@@ -283,6 +254,20 @@ export interface TradeQueryData {
     readonly log: readonly string[];
 }
 
+/**
+ * The options of PoB's trade query generator (StartQuery), as tradeQuery's `options`. Each one left out keeps
+ * the engine's default: no corrupted, scourge or talisman mods, eldritch "None" (none added), no mirrored
+ * items, no maximum level (engine/lua/generator.lua).
+ */
+export interface GeneratorOptions {
+    readonly includeCorrupted?: boolean;
+    readonly includeScourge?: boolean;
+    readonly includeTalisman?: boolean;
+    readonly includeEldritch?: 'None' | 'Copy Current' | 'Keep regular' | 'Keep regular+presence' | 'Remove';
+    readonly includeMirrored?: boolean;
+    readonly maxLevel?: number;
+}
+
 export interface TradeQueryProgress {
     readonly calcs: number;
     readonly seconds: number;
@@ -296,6 +281,11 @@ export type ScoreItemResult =
           readonly stats: StatBlock;
           readonly unparsed: readonly string[];
           readonly validForSlot: boolean;
+          /**
+           * Scored into Weapon 1 with Weapon 2 emptied: the item can't be held beside the saved off-hand (a
+           * two-hander, a bow without a quiver), so its gain includes losing the off-hand (#39, #101).
+           */
+          readonly offHandRemoved: boolean;
       }
     | { readonly index: number; readonly ok: false; readonly error: EngineErrorInfo };
 
@@ -304,6 +294,8 @@ export interface ScoreBatchSummary {
     readonly failed: number;
     readonly gcRuns: number;
     readonly seconds: number;
+    /** How many items of the batch were scored with Weapon 2 emptied. */
+    readonly offHandRemoved: number;
 }
 
 export interface PingData {
@@ -357,7 +349,7 @@ export function readStatBlock(value: unknown, path: string): StatBlock {
     return {
         damage: engineNumber(r['damage'], `${path}.damage`),
         values: values,
-        skillDps: optional(r['skillDps'], `${path}.skillDps`, (v: unknown, p: string) => array(v, p, readSkillDps)),
+        skillDps: optional(r['skillDps'], `${path}.skillDps`, (v: unknown, p: string) => luaArray(v, p, readSkillDps)),
     };
 }
 
@@ -389,40 +381,32 @@ function readItemInfo(value: unknown, path: string): ItemInfo {
     };
 }
 
-function readViewPart(value: unknown, path: string): PobViewPart {
+function readViewPart(value: unknown, path: string): ItemPart {
     const r: JsonRecord = record(value, path);
-    return { text: string(r['text'], `${path}.text`), tone: oneOf(r['tone'], `${path}.tone`, POB_TONES) };
+    return { text: string(r['text'], `${path}.text`), tone: oneOf(r['tone'], `${path}.tone`, ITEM_TONES) };
 }
 
-function readViewMod(value: unknown, path: string): { readonly text: string; readonly kind: PobModKind } {
+function readViewMod(value: unknown, path: string): ItemMod {
     const r: JsonRecord = record(value, path);
-    return { text: string(r['text'], `${path}.text`), kind: oneOf(r['kind'], `${path}.kind`, POB_MOD_KINDS) };
-}
-
-/** Lua sends an empty table as {}: an empty array may arrive as an empty object. */
-function list<T>(value: unknown, path: string, read: (v: unknown, p: string) => T): readonly T[] {
-    if (isRecord(value) && Object.keys(value).length === 0) {
-        return [];
-    }
-    return array(value, path, read);
+    return { text: string(r['text'], `${path}.text`), kind: oneOf(r['kind'], `${path}.kind`, ITEM_MOD_KINDS) };
 }
 
 export function readPobItemView(value: unknown, path: string): PobItemView {
     const r: JsonRecord = record(value, path);
     const ilvl: unknown = r['itemLevel'];
     return {
-        rarity: oneOf(r['rarity'], `${path}.rarity`, POB_RARITIES),
+        rarity: oneOf(r['rarity'], `${path}.rarity`, ITEM_RARITIES),
         name: string(r['name'], `${path}.name`),
         typeLine: string(r['typeLine'], `${path}.typeLine`),
         baseName: string(r['baseName'], `${path}.baseName`),
-        influences: list(r['influences'], `${path}.influences`, (v: unknown, p: string) => oneOf(v, p, POB_INFLUENCES)),
-        properties: list(r['properties'], `${path}.properties`, (v: unknown, p: string) => list(v, p, readViewPart)),
-        requirements: list(r['requirements'], `${path}.requirements`, readViewPart),
+        influences: luaArray(r['influences'], `${path}.influences`, (v: unknown, p: string) => oneOf(v, p, ITEM_INFLUENCES)),
+        properties: luaArray(r['properties'], `${path}.properties`, (v: unknown, p: string) => luaArray(v, p, readViewPart)),
+        requirements: luaArray(r['requirements'], `${path}.requirements`, readViewPart),
         sockets: string(r['sockets'], `${path}.sockets`),
         itemLevel: typeof ilvl === 'number' && Number.isFinite(ilvl) ? ilvl : null,
-        enchants: list(r['enchants'], `${path}.enchants`, readViewMod),
-        implicits: list(r['implicits'], `${path}.implicits`, readViewMod),
-        explicits: list(r['explicits'], `${path}.explicits`, readViewMod),
+        enchants: luaArray(r['enchants'], `${path}.enchants`, readViewMod),
+        implicits: luaArray(r['implicits'], `${path}.implicits`, readViewMod),
+        explicits: luaArray(r['explicits'], `${path}.explicits`, readViewMod),
         corrupted: boolean(r['corrupted'], `${path}.corrupted`),
         mirrored: boolean(r['mirrored'], `${path}.mirrored`),
     };
@@ -459,7 +443,7 @@ function readActiveSkill(value: unknown, path: string): ActiveSkillInfo {
         index: number(r['index'], `${path}.index`),
         name: string(r['name'], `${path}.name`),
         minion: optString(r, 'minion', path),
-        parts: array(r['parts'], `${path}.parts`, string),
+        parts: luaArray(r['parts'], `${path}.parts`, string),
         skillPart: optNumber(r, 'skillPart', path),
     };
 }
@@ -473,7 +457,7 @@ function readSocketGroup(value: unknown, path: string): SocketGroupInfo {
         slot: optString(r, 'slot', path),
         includeInFullDPS: boolean(r['includeInFullDPS'], `${path}.includeInFullDPS`),
         mainActiveSkill: optNumber(r, 'mainActiveSkill', path),
-        activeSkills: array(r['activeSkills'], `${path}.activeSkills`, readActiveSkill),
+        activeSkills: luaArray(r['activeSkills'], `${path}.activeSkills`, readActiveSkill),
     };
 }
 
@@ -491,10 +475,10 @@ export function readLoadBuild(value: unknown): LoadBuildData {
             treeVersion: optString(info, 'treeVersion', `${path}.info`),
             mainSocketGroup: optNumber(info, 'mainSocketGroup', `${path}.info`),
         },
-        skills: array(r['skills'], `${path}.skills`, readSocketGroup),
+        skills: luaArray(r['skills'], `${path}.skills`, readSocketGroup),
         target: readTarget(r['target'], `${path}.target`),
         baseline: readStatBlock(r['baseline'], `${path}.baseline`),
-        equipped: array(r['equipped'], `${path}.equipped`, readEquipped),
+        equipped: luaArray(r['equipped'], `${path}.equipped`, readEquipped),
     };
 }
 
@@ -509,7 +493,23 @@ export function readStrip(value: unknown): StripData {
         target: readTarget(r['target'], 'strip.target'),
         stats: readStatBlock(r['stats'], 'strip.stats'),
         slot: string(r['slot'], 'strip.slot'),
+        itemTotals: readItemTotals(r['itemTotals'], 'strip.itemTotals'),
     };
+}
+
+function readItemTotals(value: unknown, path: string): StripItemTotals | undefined {
+    if (value === undefined || value === null) {
+        return undefined;
+    }
+    const r: JsonRecord = record(value, path);
+    const totals: Partial<Record<keyof StripItemTotals, number>> = {};
+    for (const key of ITEM_TOTAL_KEYS) {
+        const n: number | undefined = optNumber(r, key, path);
+        if (n !== undefined) {
+            totals[key] = n;
+        }
+    }
+    return totals;
 }
 
 function readModWeight(value: unknown, path: string): ModWeight {
@@ -534,7 +534,7 @@ function readPobFilter(value: unknown, path: string): PobStatFilter {
 
 function readPobGroup(value: unknown, path: string): PobStatGroup {
     const r: JsonRecord = record(value, path);
-    return { type: string(r['type'], `${path}.type`), filters: array(r['filters'], `${path}.filters`, readPobFilter) };
+    return { type: string(r['type'], `${path}.type`), filters: luaArray(r['filters'], `${path}.filters`, readPobFilter) };
 }
 
 export function readTradeQuery(value: unknown): TradeQueryData {
@@ -550,18 +550,106 @@ export function readTradeQuery(value: unknown): TradeQueryData {
             query: string(category['query'], `${path}.category.query`),
             generator: string(category['generator'], `${path}.category.generator`),
         },
-        statWeights: array(r['statWeights'], `${path}.statWeights`, (v: unknown, p: string) => {
+        statWeights: luaArray(r['statWeights'], `${path}.statWeights`, (v: unknown, p: string) => {
             const w: JsonRecord = record(v, p);
             return { stat: string(w['stat'], `${p}.stat`), weight: number(w['weight'], `${p}.weight`) };
         }),
         affixQuality: optNumber(r, 'affixQuality', path),
         baseStatValue: number(r['baseStatValue'], `${path}.baseStatValue`),
-        weights: array(r['weights'], `${path}.weights`, readModWeight),
-        query: { stats: array(query['stats'], `${path}.query.stats`, readPobGroup), raw: query },
+        weights: luaArray(r['weights'], `${path}.weights`, readModWeight),
+        query: { stats: luaArray(query['stats'], `${path}.query.stats`, readPobGroup), raw: query },
         queryError: optString(r, 'queryError', path),
         calcs: number(r['calcs'], `${path}.calcs`),
         seconds: number(r['seconds'], `${path}.seconds`),
-        log: array(r['log'], `${path}.log`, string),
+        log: luaArray(r['log'], `${path}.log`, string),
+    };
+}
+
+/** One rolling line's weight on a unique (#113): the gain per point of the site's value for the line. */
+export interface UniqueWeight {
+    readonly id: string;
+    readonly weight: number;
+    /** PoB's line, with its range, e.g. "+(150-200) to maximum Life". */
+    readonly line: string;
+}
+
+/** One rolling line's value on the site at its lowest and highest roll (the mean of the site's "#" numbers). */
+export interface UniqueRoll {
+    readonly id: string;
+    readonly line: string;
+    readonly low: number;
+    readonly high: number;
+}
+
+/** One unique PoB knows for the item type, scored in the build (engine/lua/uniques.lua). */
+export interface UniqueInfo {
+    readonly name: string;
+    readonly base: string;
+    /** The site's name for the base. */
+    readonly tradeType: string;
+    /** The variant the weights are for (PoB's default, the current one); null when the unique has none. */
+    readonly variant: number | null;
+    readonly variants: number;
+    readonly scoreLow: number;
+    readonly scoreMid: number;
+    readonly scoreHigh: number;
+    /** scoreHigh minus the equipped item's score. */
+    readonly change: number;
+    /** Heaviest first; lines that gain nothing are left out. */
+    readonly weights: readonly UniqueWeight[];
+    /** Every rolling line with a trade stat id, helpful or not. */
+    readonly rolls: readonly UniqueRoll[];
+    /** Every line's trade stat id, rolling or not. */
+    readonly statIds: readonly string[];
+    /** Rolling lines with no trade stat id. */
+    readonly unmatched: readonly string[];
+}
+
+export interface UniquesData {
+    readonly slot: string;
+    readonly itemType: string;
+    readonly target: ResolvedTarget;
+    readonly uniques: readonly UniqueInfo[];
+}
+
+function readUniqueInfo(value: unknown, path: string): UniqueInfo {
+    const r: JsonRecord = record(value, path);
+    return {
+        name: string(r['name'], `${path}.name`),
+        base: string(r['base'], `${path}.base`),
+        tradeType: string(r['tradeType'], `${path}.tradeType`),
+        variant: optNumber(r, 'variant', path) ?? null,
+        variants: number(r['variants'], `${path}.variants`),
+        scoreLow: number(r['scoreLow'], `${path}.scoreLow`),
+        scoreMid: number(r['scoreMid'], `${path}.scoreMid`),
+        scoreHigh: number(r['scoreHigh'], `${path}.scoreHigh`),
+        change: number(r['change'], `${path}.change`),
+        weights: luaArray(r['weights'], `${path}.weights`, (v: unknown, p: string): UniqueWeight => {
+            const w: JsonRecord = record(v, p);
+            return { id: string(w['id'], `${p}.id`), weight: number(w['weight'], `${p}.weight`), line: string(w['line'], `${p}.line`) };
+        }),
+        rolls: luaArray(r['rolls'], `${path}.rolls`, (v: unknown, p: string): UniqueRoll => {
+            const w: JsonRecord = record(v, p);
+            return {
+                id: string(w['id'], `${p}.id`),
+                line: string(w['line'], `${p}.line`),
+                low: number(w['low'], `${p}.low`),
+                high: number(w['high'], `${p}.high`),
+            };
+        }),
+        statIds: luaArray(r['statIds'], `${path}.statIds`, string),
+        unmatched: luaArray(r['unmatched'], `${path}.unmatched`, string),
+    };
+}
+
+export function readUniques(value: unknown): UniquesData {
+    const path: string = 'uniques';
+    const r: JsonRecord = record(value, path);
+    return {
+        slot: string(r['slot'], `${path}.slot`),
+        itemType: string(r['itemType'], `${path}.itemType`),
+        target: readTarget(r['target'], `${path}.target`),
+        uniques: luaArray(r['uniques'], `${path}.uniques`, readUniqueInfo),
     };
 }
 
@@ -580,8 +668,9 @@ export function readScoreItem(value: unknown): ScoreItemResult {
             ok: true,
             item: readItemInfo(r['item'], `${path}.item`),
             stats: readStatBlock(r['stats'], `${path}.stats`),
-            unparsed: array(r['unparsed'], `${path}.unparsed`, string),
+            unparsed: luaArray(r['unparsed'], `${path}.unparsed`, string),
             validForSlot: boolean(r['validForSlot'], `${path}.validForSlot`),
+            offHandRemoved: boolean(r['offHandRemoved'], `${path}.offHandRemoved`),
         };
     }
     return { index: index, ok: false, error: readErrorInfo(r['error'], `${path}.error`) };
@@ -594,6 +683,7 @@ export function readScoreSummary(value: unknown): ScoreBatchSummary {
         failed: number(r['failed'], 'score.failed'),
         gcRuns: number(r['gcRuns'], 'score.gcRuns'),
         seconds: number(r['seconds'], 'score.seconds'),
+        offHandRemoved: number(r['offHandRemoved'], 'score.offHandRemoved'),
     };
 }
 

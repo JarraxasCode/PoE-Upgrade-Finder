@@ -8,20 +8,23 @@
 //
 // Complexity (V8 and V24, measured, and exact on the live checks): 10 for the filters + 50 + 4 per weighted
 // stat + (n + 1) for an And group of n stats + (n + 1) for a Not group of n stats + 1 for `type` + (n + 1)
-// for n defence filters (issue #24, measured: 4 filters cost 5), refused over 200. Influence filters aren't
+// for n defence filters (issue #24, measured: 4 filters cost 5) + 2 per socket filter row (#58, V30: one row
+// cost 2; two rows untested, so 2 each is an upper bound), refused over 200. Influence filters aren't
 // measured yet and are counted at 1 each. Over budget, the
 // lowest-priority weights go first. Requirements, exclusions and the base are never dropped.
 
-import type { DefenceKind, SlotInfluence } from '@poe-upgrade-finder/engine-client';
+import type { DefenceKind, SlotInfluence, SocketRange, SocketRow } from '@poe-upgrade-finder/vocab';
 import type { PriceFilter, SearchFilters, SearchQuery, StatFilter, StatGroup, TradeSearchBody } from '@poe-upgrade-finder/trade';
 import type { BandSearch } from './bands.ts';
-import type { SearchDefence, SearchExclusion, SearchRequirement, SlotSearchSpec, WeightedStat } from './spec.ts';
+import type { SearchDefence, SearchExclusion, SearchRequirement, SearchSockets, SlotSearchSpec, WeightedStat } from './spec.ts';
 
 export const COMPLEXITY_LIMIT: number = 200;
 const FILTERS_COST: number = 10;
 const WEIGHT_GROUP_COST: number = 50;
 const WEIGHTED_STAT_COST: number = 4;
 const TYPE_COST: number = 1;
+/** Per socket filter row (V30: sockets or links, with or without colours, added 2). */
+const SOCKET_ROW_COST: number = 2;
 /** Not measured (V24 didn't send one); assumed like the other single filters. */
 const INFLUENCE_COST: number = 1;
 /**
@@ -52,6 +55,8 @@ export interface PlanCost {
     readonly influences: number;
     /** Defence filters; missing counts none. */
     readonly defences?: number;
+    /** Socket filter rows (#58); missing counts none. */
+    readonly sockets?: number;
 }
 
 const NO_PLAN: PlanCost = { excluded: 0, typed: false, influences: 0 };
@@ -64,7 +69,8 @@ export function predictComplexity(weighted: number, required: number, plan: Plan
         (plan.excluded > 0 ? plan.excluded + 1 : 0) +
         (plan.typed ? TYPE_COST : 0) +
         INFLUENCE_COST * plan.influences +
-        ((plan.defences ?? 0) > 0 ? (plan.defences ?? 0) + 1 : 0)
+        ((plan.defences ?? 0) > 0 ? (plan.defences ?? 0) + 1 : 0) +
+        SOCKET_ROW_COST * (plan.sockets ?? 0)
     );
 }
 
@@ -86,8 +92,14 @@ export interface CompiledQuery {
  * The And group's filters: one per stat id. Requirements on the same stat (a hard need on total chaos res and
  * a plan include counting every source) become one filter with the tighter range: both must hold anyway.
  */
+/**
+ * One filter per stat: requirements on the same stat (a strip need and a plan include, or two includes) are all
+ * on the item's total, so their ranges intersect. An empty intersection would search for nothing and blame the
+ * floors, so it throws, naming the requirements (issue #71).
+ */
 export function requirementFilters(requirements: readonly SearchRequirement[]): readonly StatFilter[] {
     const merged: Map<string, { min?: number; max?: number }> = new Map();
+    const labels: Map<string, string[]> = new Map();
     for (const r of requirements) {
         const value: { min?: number; max?: number } = merged.get(r.statId) ?? {};
         if (r.min !== undefined) {
@@ -97,6 +109,15 @@ export function requirementFilters(requirements: readonly SearchRequirement[]): 
             value.max = value.max === undefined ? r.max : Math.min(value.max, r.max);
         }
         merged.set(r.statId, value);
+        labels.set(r.statId, [...(labels.get(r.statId) ?? []), r.label]);
+    }
+    for (const [id, value] of merged) {
+        if (value.min !== undefined && value.max !== undefined && value.min > value.max) {
+            const names: string = (labels.get(id) ?? [id]).map((l: string) => `"${l}"`).join(' and ');
+            throw new QueryCompileError(
+                `${names} are on the same stat and no item can meet both (at least ${value.min}, at most ${value.max}): change the range in the slot plan`,
+            );
+        }
     }
     return [...merged].map(([id, value]: [string, { min?: number; max?: number }]) => ({ id: id, value: value }));
 }
@@ -122,6 +143,14 @@ function defenceFilters(defences: readonly SearchDefence[]): Record<string, { re
     return out;
 }
 
+function socketFilterRows(sockets: readonly SearchSockets[]): Partial<Record<SocketRow, SocketRange>> {
+    const out: Partial<Record<SocketRow, SocketRange>> = {};
+    for (const s of sockets) {
+        out[s.row] = s.range;
+    }
+    return out;
+}
+
 export function compileQuery(spec: SlotSearchSpec, search: BandSearch, limit: number = COMPLEXITY_LIMIT): CompiledQuery {
     const andFilters: readonly StatFilter[] = requirementFilters(spec.requirements);
     const required: number = andFilters.length;
@@ -129,14 +158,16 @@ export function compileQuery(spec: SlotSearchSpec, search: BandSearch, limit: nu
     const defences: Record<string, { readonly min?: number; readonly max?: number }> = defenceFilters(spec.defences);
     const plan: PlanCost = {
         excluded: spec.exclusions.length,
-        typed: spec.baseType !== null,
+        // A unique's name and base cost no more than a base alone (V29: 64 for one weight and a price).
+        typed: spec.baseType !== null || spec.unique !== null,
         influences: Object.keys(influences).length,
         defences: Object.keys(defences).length,
+        sockets: spec.sockets.length,
     };
     const fixed: number = predictComplexity(0, required, plan);
     if (fixed > limit) {
         throw new QueryCompileError(
-            `The required stats, excludes, base and defences alone cost ${fixed}, over the complexity limit of ${limit}: remove some from the slot plan`,
+            `The required stats, excludes, base, defences and socket filters alone cost ${fixed}, over the complexity limit of ${limit}: remove some from the slot plan`,
         );
     }
     const { kept: weights, dropped } = fitWeights(spec.weights, (n: number) => predictComplexity(n, required, plan) <= limit);
@@ -156,15 +187,17 @@ export function compileQuery(spec: SlotSearchSpec, search: BandSearch, limit: nu
     }
     const price: PriceFilter = search.price;
     const filters: SearchFilters = {
-        type_filters: { filters: { category: { option: spec.category }, rarity: { option: 'nonunique' } } },
+        type_filters: { filters: { category: { option: spec.category }, rarity: { option: spec.rarity } } },
         ...(spec.maxLevelRequirement === undefined ? {} : { req_filters: { filters: { lvl: { max: spec.maxLevelRequirement } } } }),
         ...(plan.defences === 0 ? {} : { armour_filters: { filters: defences } }),
+        ...(spec.sockets.length === 0 ? {} : { socket_filters: { filters: socketFilterRows(spec.sockets) } }),
         trade_filters: { filters: { price: price } },
         ...(plan.influences === 0 ? {} : { misc_filters: { filters: influences } }),
     };
     const query: SearchQuery = {
         status: { option: spec.listingType },
-        ...(spec.baseType === null ? {} : { type: spec.baseType }),
+        ...(spec.unique === null ? {} : { name: spec.unique.name, type: spec.unique.tradeType }),
+        ...(spec.unique === null && spec.baseType !== null ? { type: spec.baseType } : {}),
         stats: stats,
         filters: filters,
     };

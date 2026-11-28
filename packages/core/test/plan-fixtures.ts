@@ -2,11 +2,12 @@
 // like PoB's: hybrids that share a stat with a pure mod, a "reduced" suffix, rarity on both sides, a group with
 // two different stats, influence pools, and eldritch implicits.
 
-import type { SlotBase, SlotData, SlotFamily, SlotMod, SlotModType } from '@poe-upgrade-finder/engine-client';
+import type { SlotBase, SlotData, SlotFamily, SlotMod } from '@poe-upgrade-finder/engine-client';
 import { priceBands } from '../src/bands.ts';
 import { DEFAULT_FLOORS } from '../src/floors.ts';
 import type { PobTradeQuery, RunContext } from '../src/spec.ts';
 import { baseStats } from './fixtures.ts';
+import type { SlotModType } from '@poe-upgrade-finder/vocab';
 
 export const S = {
     ms: 'explicit.stat_ms',
@@ -243,6 +244,47 @@ export function bootsData(): SlotData {
             ]),
         ],
         pools: [SORCERER.map((n: string) => `${n}1`), ['SHAPER1'], ['ELDER1'], ['CRUSADER1'], SLINK.map((n: string) => `${n}1`)],
+        families: fams,
+        mods: mods,
+        unmatched: [],
+        seconds: 0.1,
+    };
+}
+
+/** A plain ring pool from the same families: life, mana and rarity prefixes; resists, stun recovery and rarity suffixes. */
+const RING: readonly string[] = ['LIFE', 'MANA', 'RARP', 'FIRE', 'COLD', 'CHAOS', 'SR', 'RARS'];
+
+/** A ring base whose implicit changes its affixes, with PoB 2.68.1's own lines (Data/Bases/ring.lua). */
+function ringBase(name: string, lines: readonly string[]): SlotBase {
+    const implicits: SlotBase['implicits'] = lines.length === 0 ? [] : [{ modId: `${name}Implicit`, lines: lines, stats: [] }];
+    return { ...base(name, name, {}, { none: 0 }, implicits), tags: ['ring'] };
+}
+
+/** Ring slot data (issue #37): a plain ring, and the rings whose implicits change how many prefixes and suffixes they take. */
+export function ringData(): SlotData {
+    const { families: fams, mods } = families();
+    const cannotChange: string = 'Implicit Modifiers Cannot Be Changed';
+    return {
+        pobVersion: '2.68.1',
+        baseType: 'Ring',
+        bases: [
+            ringBase('Iron Ring', []),
+            ringBase('Ratcheting Ring', ['-3 Prefix Modifiers allowed', '+3 Suffix Modifiers allowed', cannotChange]),
+            ringBase('Helical Ring', [
+                '-2 Prefix Modifiers allowed',
+                '+1 Suffix Modifier allowed',
+                cannotChange,
+                '50% increased Suffix Modifier magnitudes',
+            ]),
+            ringBase('Cogwork Ring', [
+                '-1 Prefix Modifier allowed',
+                '+1 Suffix Modifier allowed',
+                cannotChange,
+                '25% increased Suffix Modifier magnitudes',
+            ]),
+            ringBase('Composite Ring', ['+3 Prefix Modifiers allowed', '-3 Suffix Modifiers allowed', cannotChange]),
+        ],
+        pools: [RING.map((n: string) => `${n}1`)],
         families: fams,
         mods: mods,
         unmatched: [],

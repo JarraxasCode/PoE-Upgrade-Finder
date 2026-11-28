@@ -3,16 +3,28 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import type { BuildSettings, BuildState, BuildsList, GearSlot } from '@poe-upgrade-finder/ipc';
+import type { BuildSettings, BuildState, BuildSummary, BuildsList } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
 import type { Loadable } from './loadable.ts';
 import { readyValue } from './loadable.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import type { GearSlot } from '@poe-upgrade-finder/vocab';
+import { dismissKey, notify } from './notices.ts';
 
 export const buildsList: Signal<Loadable<BuildsList>> = signal<Loadable<BuildsList>>({ kind: 'loading' });
 export const selectedBuildId: Signal<string | null> = signal<string | null>(null);
 export const buildSettings: Signal<Loadable<BuildSettings>> = signal<Loadable<BuildSettings>>({ kind: 'loading' });
 export const buildState: Signal<BuildState> = signal<BuildState>({ kind: 'none' });
+
+/** A build's settings that failed to save (plan, weight or filter edits): kept on screen until a save works. */
+export interface UnsavedSettings {
+    readonly buildId: string;
+    readonly settings: BuildSettings;
+}
+
+export const unsaved: Signal<UnsavedSettings | null> = signal<UnsavedSettings | null>(null);
+
+const UNSAVED_KEY: string = 'unsaved-settings';
 
 const LAST_BUILD_KEY: string = 'uf.lastBuild';
 
@@ -74,17 +86,30 @@ export async function selectBuild(id: string): Promise<void> {
     if (selectedBuildId.value !== id) {
         return;
     }
-    buildSettings.value = { kind: 'ready', value: settings };
+    // Edits that didn't save stay on screen (and in the next save) rather than vanish on a build switch.
+    const kept: UnsavedSettings | null = unsaved.value;
+    buildSettings.value = { kind: 'ready', value: kept !== null && kept.buildId === id ? kept.settings : settings };
     await loadInPob(id, settings.lastTarget);
 }
 
-async function loadInPob(id: string, target: string | null): Promise<void> {
+const SELECT_KEY: string = 'build-select';
+
+/** Loads the build in PoB; the summary, or undefined when the load failed (already shown). */
+async function loadInPob(id: string, target: string | null): Promise<BuildSummary | undefined> {
+    let summary: BuildSummary;
     try {
-        await call('build.select', { buildId: id, target: target });
+        summary = await call('build.select', { buildId: id, target: target });
     } catch (error: unknown) {
-        // PoB's own errors also arrive as a build-state event (shown under the form); this is for the log.
+        // PoB's own errors arrive as a build-state event and show under the form; the rest (a run going, the
+        // save gone) would otherwise show nowhere.
         console.warn('build.select failed', messageOf(error));
+        if (selectedBuildId.value === id && buildState.value.kind !== 'error') {
+            notify('warn', `PoB didn't load the build: ${messageOf(error)}`, { key: SELECT_KEY });
+        }
+        return undefined;
     }
+    dismissKey(SELECT_KEY);
+    return summary;
 }
 
 /**
@@ -101,7 +126,8 @@ export async function updateBuildSettings(change: Partial<BuildSettings>): Promi
     buildSettings.value = { kind: 'ready', value: next };
     try {
         const saved: BuildSettings = await call('build.settings.save', { buildId: id, settings: next });
-        if (selectedBuildId.value === id) {
+        savedFor(id);
+        if (selectedBuildId.value === id && readyValue(buildSettings.value) === next) {
             buildSettings.value = { kind: 'ready', value: saved };
         }
     } catch (error: unknown) {
@@ -112,7 +138,58 @@ export async function updateBuildSettings(change: Partial<BuildSettings>): Promi
     }
 }
 
-/** The Search view's choices, remembered per build. Losing one isn't worth an error on screen: logged only. */
+/** A save went through: it carried any edits kept from a failed one too. */
+function savedFor(id: string): void {
+    if (unsaved.value?.buildId === id) {
+        unsaved.value = null;
+        dismissKey(UNSAVED_KEY);
+    }
+}
+
+/**
+ * Saves real work (a slot plan, weight edits, the level filter) in the selected build's settings. A failed
+ * save keeps the edit on screen, marked unsaved, with a Retry: it never undoes itself (#43).
+ */
+export async function saveForBuild(change: Partial<BuildSettings>): Promise<void> {
+    const id: string | null = selectedBuildId.value;
+    const now: BuildSettings | undefined = readyValue(buildSettings.value);
+    if (id === null || now === undefined) {
+        return;
+    }
+    const next: BuildSettings = { ...now, ...change };
+    buildSettings.value = { kind: 'ready', value: next };
+    await saveKept(id, next);
+}
+
+async function saveKept(id: string, settings: BuildSettings): Promise<void> {
+    try {
+        const saved: BuildSettings = await call('build.settings.save', { buildId: id, settings: settings });
+        savedFor(id);
+        if (selectedBuildId.value === id && readyValue(buildSettings.value) === settings) {
+            buildSettings.value = { kind: 'ready', value: saved };
+        }
+    } catch (error: unknown) {
+        console.warn('could not save build settings', messageOf(error));
+        unsaved.value = { buildId: id, settings: settings };
+        const name: string = readyValue(buildsList.value)?.builds.find((b) => b.id === id)?.name ?? id;
+        notify('error', `Your changes to ${name} aren't saved: ${messageOf(error)}`, {
+            key: UNSAVED_KEY,
+            action: { label: 'Retry', run: retrySave },
+        });
+    }
+}
+
+/** Saves the kept edits again: the build's current settings when it's selected, else the kept copy. */
+export function retrySave(): void {
+    const kept: UnsavedSettings | null = unsaved.value;
+    if (kept === null) {
+        return;
+    }
+    const current: BuildSettings | undefined = selectedBuildId.value === kept.buildId ? readyValue(buildSettings.value) : undefined;
+    void saveKept(kept.buildId, current ?? kept.settings);
+}
+
+/** The Search view's small choices (slot, budget, target), remembered per build. Losing one isn't worth an error on screen: logged only. */
 export function rememberForBuild(change: Partial<BuildSettings>): Promise<void> {
     return updateBuildSettings(change).catch((error: unknown) => {
         console.warn('could not remember a search choice', error);
@@ -124,8 +201,19 @@ export async function setTarget(target: string): Promise<void> {
     if (id === null) {
         return;
     }
+    // Shown at once; then the target PoB actually used is what stays remembered (#36). One it can't compute
+    // (Full DPS with no group in Full DPS) loads as saved with a warning, and a failed load keeps the old one:
+    // saving a failed target would only bring the failure back on every selection.
+    const before: string | null = readyValue(buildSettings.value)?.lastTarget ?? null;
     await rememberForBuild({ lastTarget: target });
-    await loadInPob(id, target);
+    const summary: BuildSummary | undefined = await loadInPob(id, target);
+    if (selectedBuildId.value !== id) {
+        return;
+    }
+    const used: string | null = summary === undefined ? before : summary.targetId;
+    if (used !== target) {
+        await rememberForBuild({ lastTarget: used });
+    }
 }
 
 export function setSlot(slot: GearSlot): void {

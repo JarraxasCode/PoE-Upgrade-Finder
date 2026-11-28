@@ -2,10 +2,24 @@
 // search for, what each item must pass and what to note. The query compiler, the scoring pipeline and the
 // UI only read the spec, so new options become new entries in it (from new sources), not new code paths.
 
-import type { DefenceKind, GearSlot, SlotInfluence } from '@poe-upgrade-finder/engine-client';
-import type { ItemDisplay, ListingPrice, ListingStatus, StatGroupType, StatLine } from '@poe-upgrade-finder/trade';
+import type {
+    BandRole,
+    DefenceKind,
+    FloorSettings,
+    GearSlot,
+    ItemView,
+    LevelFilter,
+    ListingType,
+    PickedUnique,
+    PruneReason,
+    SlotInfluence,
+    WeightEdits,
+    SocketRange,
+    SocketRow,
+} from '@poe-upgrade-finder/vocab';
+import { applyWeightEdits } from '@poe-upgrade-finder/vocab';
+import type { ListingPrice, StatGroupType, StatLine } from '@poe-upgrade-finder/trade';
 import type { PriceBand } from './bands.ts';
-import type { FloorSettings } from './floors.ts';
 import type { PobStats } from './stats.ts';
 
 export type SlotId = GearSlot;
@@ -28,13 +42,34 @@ export interface SearchRequirement {
     readonly siteText?: string;
     /** The label's range is the negative of the site's (a "reduced" include on an "increased" stat, decision 11). */
     readonly negated?: boolean;
+    /** A strip need lowered to what the current item carries (#34): the gap in the build's total it came from. */
+    readonly gap?: number;
 }
+
+/** The totals the current item carries itself, from PoB's parsed mods (#34): what a strip need is capped at. */
+export type ItemTotalKey = 'Chaos' | 'Fire' | 'Cold' | 'Lightning' | 'Str' | 'Dex' | 'Int';
+export type ItemTotals = Readonly<Partial<Record<ItemTotalKey, number>>>;
 
 /** A stat no result may have (the slot plan's excludes), compiled to a Not group. */
 export interface SearchExclusion {
     readonly statId: string;
     readonly origin: 'plan';
     /** "Excluded: #% increased Rarity of Items found, from plan". */
+    readonly label: string;
+}
+
+/**
+ * A hybrid mod no result may have (the slot plan's hybrid excludes, #38). The site can't filter mods, so nothing
+ * goes in the query: a fetched item whose lines for these stats share one mod index in one domain is dropped
+ * before scoring (excluded-mods.ts, G19).
+ */
+export interface SearchModExclusion {
+    /** The hybrid's stats, as the slot data lists them: "explicit.stat_4052037485". */
+    readonly statIds: readonly string[];
+    /** The mod as the editor shows it: "+# to maximum Energy Shield / +# to maximum Mana". */
+    readonly name: string;
+    readonly origin: 'plan';
+    /** "Excluded: +# to maximum Energy Shield / +# to maximum Mana (hybrid mod), from plan". */
     readonly label: string;
 }
 
@@ -48,17 +83,14 @@ export interface SearchDefence {
     readonly label: string;
 }
 
-/** Why the slot plan took a weight out of the weighted group (PLAN.md, "v2a: the slot plan"). */
-export type PruneReason =
-    | 'excluded'
-    | 'included'
-    | 'base-cannot-roll'
-    | 'same-group'
-    | 'prefixes-full'
-    | 'suffixes-full'
-    | 'affixes-full'
-    | 'no-room'
-    | 'defences';
+/** One of the site's socket filter rows (the slot plan's, #58), compiled to socket_filters. */
+export interface SearchSockets {
+    readonly row: SocketRow;
+    readonly range: SocketRange;
+    readonly origin: 'plan';
+    /** "Links ≥ 5, 3 R, from plan". */
+    readonly label: string;
+}
 
 export interface PrunedWeight extends WeightedStat {
     readonly reason: PruneReason;
@@ -104,8 +136,10 @@ export interface ListedItem {
     /** The price in chaos at the run's divine rate; undefined for other currencies (flagged, not converted). */
     readonly chaosEquivalent: number | undefined;
     readonly bandId: string;
+    /** In budget or slightly over, by price (bands.ts, priceRole), whichever band fetched it. */
+    readonly role: BandRole;
     /** Tooltip data from the fetch, when the item came from one. */
-    readonly display?: ItemDisplay | undefined;
+    readonly display?: ItemView | undefined;
 }
 
 export interface ItemNote {
@@ -137,9 +171,15 @@ export interface PobTradeQuery {
     };
 }
 
+/** What a search returns by rarity: rares (every run but a unique search), or one picked unique (#113). */
+export type SearchRarity = 'rare' | 'unique';
+
 export interface SlotSearchSpec {
     readonly slot: SlotId;
-    readonly listingType: ListingStatus;
+    readonly listingType: ListingType;
+    readonly rarity: SearchRarity;
+    /** The unique searched for (its name and the site's base name go in the query); null: a rare search. */
+    readonly unique: PickedUnique | null;
     /** Trade category, from PoB's generator for the slot's item (e.g. "armour.boots"). */
     readonly category: string;
     /** The highest level requirement a result may have (req_filters), from the build's level filter; undefined: none. */
@@ -149,8 +189,12 @@ export interface SlotSearchSpec {
     readonly baseType: string | null;
     readonly requirements: readonly SearchRequirement[];
     readonly exclusions: readonly SearchExclusion[];
+    /** Hybrid mods no result may have: dropped after the fetch, not searched for (#38). */
+    readonly modExclusions: readonly SearchModExclusion[];
     /** Ranges on the item's defences (the slot plan's). */
     readonly defences: readonly SearchDefence[];
+    /** The site's socket filters (the slot plan's, #58). */
+    readonly sockets: readonly SearchSockets[];
     /** Influences the item must have (from the plan's influenced includes), at most two. */
     readonly influences: readonly SlotInfluence[];
     /** In priority order (PoB's: by gain at a mid roll). v1: PoB's generator. After the plan's pruning. */
@@ -161,12 +205,6 @@ export interface SlotSearchSpec {
     readonly checks: readonly ItemCheck[];
     readonly noters: readonly ItemNoter[];
 }
-
-/**
- * The level requirement filter (issue #22): up to the character's level (the default, as in v1), none, or up to a
- * level the user sets (to buy ahead of levelling, or to stay under a lower one).
- */
-export type LevelFilter = { readonly kind: 'character' } | { readonly kind: 'off' } | { readonly kind: 'max'; readonly level: number };
 
 export const DEFAULT_LEVEL_FILTER: LevelFilter = { kind: 'character' };
 
@@ -185,7 +223,7 @@ export function maxLevelRequirement(characterLevel: number | undefined, filter: 
 /** Everything a source may read to fill the spec for one run. */
 export interface RunContext {
     readonly slot: SlotId;
-    readonly listingType: ListingStatus;
+    readonly listingType: ListingType;
     readonly priceBands: readonly PriceBand[];
     readonly characterLevel: number | undefined;
     /** The level requirement filter; missing: up to the character's level. */
@@ -194,53 +232,120 @@ export interface RunContext {
     readonly baseline: PobStats;
     /** The build with the slot empty. */
     readonly stripped: PobStats;
+    /** What the current item carries itself; undefined for an empty slot (strip needs are then uncapped). */
+    readonly itemTotals?: ItemTotals | undefined;
     readonly pobQuery: PobTradeQuery;
     readonly floors: FloorSettings;
     /**
      * The user's review of the weights before the search (PLAN.md, "Review PoB's weights before searching"):
-     * stat id → weight; 0 turns the stat off. Stats not named keep their source's weight.
+     * stat id → a factor on the source's weight, or off (vocab's weight-model). Stats not named keep their weight.
      */
-    readonly weightEdits?: Readonly<Record<string, number>> | undefined;
+    readonly weightEdits?: WeightEdits | undefined;
 }
 
-export interface RequirementSource {
+/**
+ * What one source adds to a slot's search (PLAN.md, "Search spec"). Every part is optional; composeSpec merges
+ * them in source order. The build's sources add needs, weights and checks; the slot plan adds the rest.
+ */
+export interface SpecContribution {
+    readonly requirements?: readonly SearchRequirement[];
+    readonly exclusions?: readonly SearchExclusion[];
+    readonly modExclusions?: readonly SearchModExclusion[];
+    readonly defences?: readonly SearchDefence[];
+    readonly sockets?: readonly SearchSockets[];
+    readonly influences?: readonly SlotInfluence[];
+    /** In priority order; one weight per stat id, the first source to name it wins. */
+    readonly weights?: readonly WeightedStat[];
+    readonly checks?: readonly ItemCheck[];
+    readonly noters?: readonly ItemNoter[];
+    /** The trade category, over PoB's (the plan's item type); the last source to set it wins. */
+    readonly category?: string;
+    /** The site's name for one base; the last source to set it wins. */
+    readonly baseType?: string;
+    /** The last source to set it wins; none: rare. */
+    readonly rarity?: SearchRarity;
+    /** The unique to search for; the last source to set it wins. */
+    readonly unique?: PickedUnique;
+    /** Takes weights out of the merged list, before the user's edits (the slot plan's pruning, by stat). */
+    readonly prune?: (weights: readonly WeightedStat[]) => {
+        readonly kept: readonly WeightedStat[];
+        readonly pruned: readonly PrunedWeight[];
+    };
+}
+
+export interface SpecSource {
     readonly id: string;
-    requirementsFor(context: RunContext): readonly SearchRequirement[];
+    contribute(context: RunContext): SpecContribution;
 }
 
-export interface WeightSource {
-    readonly id: string;
-    weightsFor(context: RunContext): readonly WeightedStat[];
-}
-
-export interface CheckSource {
-    readonly id: string;
-    checksFor(context: RunContext): readonly ItemCheck[];
-}
-
-export interface NoterSource {
-    readonly id: string;
-    notersFor(context: RunContext): readonly ItemNoter[];
-}
-
-export interface SpecSources {
-    readonly requirements: readonly RequirementSource[];
-    readonly weights: readonly WeightSource[];
-    readonly checks: readonly CheckSource[];
-    readonly noters: readonly NoterSource[];
+/** The spec from the run's context and its sources, in order. */
+export function composeSpec(context: RunContext, sources: readonly SpecSource[]): SlotSearchSpec {
+    const parts: readonly SpecContribution[] = sources.map((s: SpecSource) => s.contribute(context));
+    const all = <T>(pick: (c: SpecContribution) => readonly T[] | undefined): T[] => parts.flatMap((c: SpecContribution) => pick(c) ?? []);
+    // One weight per stat id: the first source to name it wins.
+    const weights: WeightedStat[] = [];
+    const seen: Set<string> = new Set<string>();
+    for (const w of all((c: SpecContribution) => c.weights)) {
+        if (!seen.has(w.statId)) {
+            seen.add(w.statId);
+            weights.push(w);
+        }
+    }
+    // The plan prunes first, then the edits apply: the same order as the weight review, so the pruned list
+    // holds the source's weights and an off stat the plan takes out reads as pruned in both (#111).
+    let kept: readonly WeightedStat[] = weights;
+    const pruned: PrunedWeight[] = [];
+    for (const c of parts) {
+        if (c.prune !== undefined) {
+            const result = c.prune(kept);
+            kept = result.kept;
+            pruned.push(...result.pruned);
+        }
+    }
+    kept = applyWeightEdits(kept, context.weightEdits);
+    const last = <T>(pick: (c: SpecContribution) => T | undefined): T | undefined =>
+        parts.reduce((found: T | undefined, c: SpecContribution) => pick(c) ?? found, undefined);
+    const groupType: string | undefined = context.pobQuery.query.stats.find(
+        (g: { readonly type: string }) => g.type === 'weight' || g.type === 'weight2',
+    )?.type;
+    return {
+        slot: context.slot,
+        listingType: context.listingType,
+        rarity: last((c: SpecContribution) => c.rarity) ?? 'rare',
+        unique: last((c: SpecContribution) => c.unique) ?? null,
+        category: last((c: SpecContribution) => c.category) ?? context.pobQuery.category.query,
+        maxLevelRequirement: maxLevelRequirement(context.characterLevel, context.levelFilter),
+        priceBands: context.priceBands,
+        baseType: last((c: SpecContribution) => c.baseType) ?? null,
+        requirements: all((c: SpecContribution) => c.requirements),
+        exclusions: all((c: SpecContribution) => c.exclusions),
+        modExclusions: all((c: SpecContribution) => c.modExclusions),
+        defences: all((c: SpecContribution) => c.defences),
+        sockets: all((c: SpecContribution) => c.sockets),
+        influences: all((c: SpecContribution) => c.influences),
+        weights: kept,
+        pruned: pruned,
+        weightGroupType: groupType === 'weight2' ? 'weight2' : 'weight',
+        checks: all((c: SpecContribution) => c.checks),
+        noters: all((c: SpecContribution) => c.noters),
+    };
 }
 
 /** The JSON-safe form of a spec, saved with each run. */
 export interface SavedSpec {
     readonly slot: SlotId;
-    readonly listingType: ListingStatus;
+    readonly listingType: ListingType;
+    readonly rarity: SearchRarity;
+    readonly unique: PickedUnique | null;
     readonly category: string;
     readonly maxLevelRequirement: number | undefined;
     readonly priceBands: readonly PriceBand[];
     readonly baseType: string | null;
     readonly requirements: readonly SearchRequirement[];
     readonly exclusions: readonly SearchExclusion[];
+    readonly modExclusions: readonly SearchModExclusion[];
     readonly defences: readonly SearchDefence[];
+    readonly sockets: readonly SearchSockets[];
     readonly influences: readonly SlotInfluence[];
     readonly weights: readonly WeightedStat[];
     readonly pruned: readonly PrunedWeight[];
@@ -253,13 +358,17 @@ export function saveSpec(spec: SlotSearchSpec): SavedSpec {
     return {
         slot: spec.slot,
         listingType: spec.listingType,
+        rarity: spec.rarity,
+        unique: spec.unique,
         category: spec.category,
         maxLevelRequirement: spec.maxLevelRequirement,
         priceBands: spec.priceBands,
         baseType: spec.baseType,
         requirements: spec.requirements,
         exclusions: spec.exclusions,
+        modExclusions: spec.modExclusions,
         defences: spec.defences,
+        sockets: spec.sockets,
         influences: spec.influences,
         weights: spec.weights,
         pruned: spec.pruned,
@@ -267,62 +376,6 @@ export function saveSpec(spec: SlotSearchSpec): SavedSpec {
         checks: spec.checks.map((c: ItemCheck) => ({ id: c.id, kind: c.kind, label: c.label })),
         noters: spec.noters.map((n: ItemNoter) => n.id),
     };
-}
-
-export class SpecBuilder {
-    private readonly sources: SpecSources;
-
-    public constructor(sources: SpecSources) {
-        this.sources = sources;
-    }
-
-    public build(context: RunContext): SlotSearchSpec {
-        const requirements: SearchRequirement[] = [];
-        for (const source of this.sources.requirements) {
-            requirements.push(...source.requirementsFor(context));
-        }
-        // One weight per stat id: the first source to name it wins (v2 adds sources after PoB's).
-        const weights: WeightedStat[] = [];
-        const seen: Set<string> = new Set<string>();
-        for (const source of this.sources.weights) {
-            for (const w of source.weightsFor(context)) {
-                if (!seen.has(w.statId)) {
-                    seen.add(w.statId);
-                    weights.push(w);
-                }
-            }
-        }
-        const checks: ItemCheck[] = [];
-        for (const source of this.sources.checks) {
-            checks.push(...source.checksFor(context));
-        }
-        const noters: ItemNoter[] = [];
-        for (const source of this.sources.noters) {
-            noters.push(...source.notersFor(context));
-        }
-        const edited: WeightedStat[] = applyWeightEdits(weights, context.weightEdits);
-        const groupType: string | undefined = context.pobQuery.query.stats.find(
-            (g: { readonly type: string }) => g.type === 'weight' || g.type === 'weight2',
-        )?.type;
-        return {
-            slot: context.slot,
-            listingType: context.listingType,
-            category: context.pobQuery.category.query,
-            maxLevelRequirement: maxLevelRequirement(context.characterLevel, context.levelFilter),
-            priceBands: context.priceBands,
-            // The slot plan fills these (buildSlotSpec); the plain builder searches as v0.1 did.
-            baseType: null,
-            requirements: requirements,
-            exclusions: [],
-            defences: [],
-            influences: [],
-            weights: edited,
-            pruned: [],
-            weightGroupType: groupType === 'weight2' ? 'weight2' : 'weight',
-            checks: checks,
-            noters: noters,
-        };
-    }
 }
 
 /** PoB's generated weighted group, in PoB's order, zero weights dropped (also the Search view's review list). */
@@ -341,27 +394,10 @@ export function pobWeightList(query: PobTradeQuery): WeightedStat[] {
     return out;
 }
 
-/** The user's edits over the collected weights: a stat set to 0 is dropped, another number replaces the weight. */
-export function applyWeightEdits(weights: readonly WeightedStat[], edits: Readonly<Record<string, number>> | undefined): WeightedStat[] {
-    if (edits === undefined) {
-        return [...weights];
-    }
-    const out: WeightedStat[] = [];
-    for (const w of weights) {
-        const e: number | undefined = edits[w.statId];
-        if (e === undefined || !Number.isFinite(e)) {
-            out.push(w);
-        } else if (e > 0) {
-            out.push({ ...w, weight: e });
-        }
-    }
-    return out;
-}
-
-/** v1's weights: PoB's generated weighted group, in PoB's order, zero weights dropped. */
-export const pobWeights: WeightSource = {
+/** The build's weights: PoB's generated weighted group, in PoB's order, zero weights dropped. */
+export const pobWeights: SpecSource = {
     id: 'pob-generator',
-    weightsFor(context: RunContext): readonly WeightedStat[] {
-        return pobWeightList(context.pobQuery);
+    contribute(context: RunContext): SpecContribution {
+        return { weights: pobWeightList(context.pobQuery) };
     },
 };

@@ -1,19 +1,21 @@
-// What the headless mode and the windowed app's runs share: PoB as the run's engine, the run's JSON record
+// What every run uses: PoB as the run's engine, the run's JSON record
 // (runs/<run id>.json, PLAN.md, Data: each run's query, scored items and picks) and keeping the last 20.
 
 import { readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { buyLink, saveSpec } from '@poe-upgrade-finder/core';
-import type { EngineScore, FilteredItem, LevelFilter, RunEngine, RunResult, SlotPlan, SlotSearchSpec } from '@poe-upgrade-finder/core';
-import type {
-    EngineClient,
-    GearSlot,
-    ItemInfo,
-    ResolvedTarget,
-    ScoreItemResult,
-    StatBlock,
-    TargetRequest,
-} from '@poe-upgrade-finder/engine-client';
+import type { EngineScore, FilteredItem, PlanGear, RunEngine, RunResult, SlotSearchSpec } from '@poe-upgrade-finder/core';
+import type { EngineClient, ItemInfo, ResolvedTarget, ScoreItemResult, StatBlock, TargetRequest } from '@poe-upgrade-finder/engine-client';
+import type { GearSlot, LevelFilter, SlotPlan } from '@poe-upgrade-finder/vocab';
+
+/** The build's weapons as the plan check reads them (#39), from what PoB loaded. */
+export function planGear(equipped: readonly { readonly slot: string; readonly type: string | undefined }[]): PlanGear {
+    const typeIn = (slot: string): string | null => {
+        const item = equipped.find((e) => e.slot === slot);
+        return item === undefined ? null : (item.type ?? null);
+    };
+    return { weapon1Type: typeIn('Weapon 1'), weapon2Type: typeIn('Weapon 2') };
+}
 
 /** PoB scores the run's items in its slot, with its damage target. */
 export function engineAdapter(engine: EngineClient, slot: GearSlot, target: TargetRequest): RunEngine {
@@ -25,7 +27,14 @@ export function engineAdapter(engine: EngineClient, slot: GearSlot, target: Targ
                 (r: ScoreItemResult) => {
                     onItem(
                         r.ok
-                            ? { index: r.index, ok: true, stats: r.stats, unparsed: r.unparsed, validForSlot: r.validForSlot }
+                            ? {
+                                  index: r.index,
+                                  ok: true,
+                                  stats: r.stats,
+                                  unparsed: r.unparsed,
+                                  validForSlot: r.validForSlot,
+                                  offHandRemoved: r.offHandRemoved,
+                              }
                             : { index: r.index, ok: false, message: r.error.message },
                     );
                 },
@@ -68,7 +77,7 @@ export interface RunRecordInput {
     readonly pobVersion: string;
     readonly build: string;
     readonly league: string;
-    /** The run's options as given (headless options, or the Search view's request). */
+    /** The run's options as given (the Search view's request; older records: the retired headless mode's). */
     readonly options: unknown;
     readonly budgetChaos: number;
     readonly chaosPerDivine: number | undefined;
@@ -77,7 +86,7 @@ export interface RunRecordInput {
     readonly currentItem: ItemInfo;
     readonly spec: SlotSearchSpec;
     readonly result: RunResult;
-    /** The slot plan searched (the windowed app); missing: none (the headless mode). */
+    /** The slot plan searched; missing: none (records from the retired headless mode). */
     readonly plan?: SlotPlan | undefined;
     /** The build's level requirement filter (issue #22); missing: up to the character's level. */
     readonly levelFilter?: LevelFilter | undefined;

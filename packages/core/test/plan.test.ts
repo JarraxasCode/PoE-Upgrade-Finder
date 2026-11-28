@@ -2,17 +2,17 @@ import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { BandSearch } from '../src/bands.ts';
 import type { SlotData } from '@poe-upgrade-finder/engine-client';
-import { categoryOf, SLOT_ITEM_TYPES, slotTakes } from '../src/item-types.ts';
-import { checkPlan, emptyPlan, isEmptyPlan, pruneWeights } from '../src/plan.ts';
-import type { ModPick, PlanCheck, SlotPlan } from '../src/plan.ts';
+import { analysePlan, checkPlan, isEmptyPlan } from '../src/plan.ts';
+import type { PlanCheck } from '../src/plan.ts';
 import { compileQuery, predictComplexity, QueryCompileError } from '../src/query-compiler.ts';
 import type { CompiledQuery } from '../src/query-compiler.ts';
-import { buildSlotSpec, siteRange } from '../src/slot-spec.ts';
+import { BUILD_SOURCES, buildSlotSpec, siteRange } from '../src/slot-spec.ts';
 import type { SlotSpecResult } from '../src/slot-spec.ts';
-import { saveSpec } from '../src/spec.ts';
+import { composeSpec, saveSpec } from '../src/spec.ts';
 import type { PrunedWeight, SlotSearchSpec, WeightedStat } from '../src/spec.ts';
-import { v1SpecBuilder } from '../src/v1.ts';
 import { bootsContext, bootsData, S } from './plan-fixtures.ts';
+import { SLOT_ITEM_TYPES, categoryOf, emptySlotPlan, slotTakes } from '@poe-upgrade-finder/vocab';
+import type { ModPick, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const SEARCH: BandSearch = { bandId: 'band-2', option: 'chaos', price: { min: 1, max: 33.33, option: 'chaos' } };
 
@@ -46,7 +46,7 @@ function specOf(p: SlotPlan, weights: readonly (readonly [string, number])[] = [
 
 function prunedOf(p: SlotPlan, ids: readonly string[]): ReadonlyMap<string, PrunedWeight['reason']> {
     const weights: WeightedStat[] = ids.map((id: string) => ({ statId: id, weight: 1 }));
-    const { pruned } = pruneWeights(weights, p, 'Boots', bootsData());
+    const { pruned } = analysePlan(p, 'Boots', bootsData()).prune(weights);
     return new Map(pruned.map((w: PrunedWeight) => [w.statId, w.reason]));
 }
 
@@ -63,12 +63,13 @@ test('an empty plan searches exactly as v0.1: same spec, same query body', () =>
         [S.evasion, 1],
         ['pseudo.pseudo_total_fire_resistance', 1],
     ];
-    const p: SlotPlan = emptyPlan('Boots');
+    const p: SlotPlan = emptySlotPlan('Boots');
     assert.equal(isEmptyPlan(p), true);
     // No slot data is needed for it.
     const result: SlotSpecResult = buildSlotSpec(p, { context: bootsContext(weights), slotData: undefined });
     assert.equal(result.ok, true);
-    const v1: SlotSearchSpec = v1SpecBuilder().build(bootsContext(weights));
+    // The build's sources alone: the plan adds nothing.
+    const v1: SlotSearchSpec = composeSpec(bootsContext(weights), BUILD_SOURCES);
     if (result.ok) {
         // The checks are fresh closures per build, so compare the saved (JSON-safe) form.
         assert.deepEqual(saveSpec(result.spec), saveSpec(v1));
@@ -289,6 +290,52 @@ test('bad ranges, empty picks, and a stat both included and excluded are refused
     assert.deepEqual(codes(check(plan('Sorcerer Boots', [MS, exclude('prefix', 'MovementVelocity', S.ms)]))), ['include-and-exclude']);
 });
 
+test('a hybrid exclude clashes only with an include that carries all its stats (#38)', () => {
+    const essr: Omit<ModPick, 'rule'> = {
+        position: 'prefix',
+        group: 'LocalEnergyShieldAndStunRecoveryPercent',
+        influence: 'none',
+        stats: [{ statId: S.es }, { statId: S.sr }],
+    };
+    const excludeEssr: ModPick = { ...essr, rule: 'exclude' };
+    // ES% from the pure mod is fine: only the hybrid mod is dropped after the fetch.
+    assert.deepEqual(codes(check(plan('Sorcerer Boots', [ES, excludeEssr]))), []);
+    // Including the hybrid's stats in one mod (the same mod, or its craft) while excluding it can't be met.
+    assert.deepEqual(codes(check(plan('Sorcerer Boots', [{ ...essr, rule: 'include' }, excludeEssr]))), ['include-and-exclude']);
+    // A pure exclude is still a Not group: it clashes with a hybrid include that carries its stat.
+    assert.deepEqual(
+        codes(check(plan('Sorcerer Boots', [{ ...essr, rule: 'include' }, exclude('prefix', 'LocalEnergyShieldPercent', S.es)]))),
+        ['include-and-exclude'],
+    );
+});
+
+test('two includes on one stat: both ranges are on the total, so they intersect or refuse (issue #71)', () => {
+    const pureMana = (range: { min?: number; max?: number }): ModPick => include('prefix', 'IncreasedMana', S.mana, range);
+    const esMana = (range: { min?: number; max?: number }): ModPick => ({
+        position: 'prefix',
+        group: 'LocalEnergyShieldAndManaPercent',
+        influence: 'none',
+        rule: 'include',
+        stats: [{ statId: S.es }, { statId: S.mana, ...range }],
+    });
+    // Hybrid mana 17 to 25 beside pure mana 40 or more: no total is both.
+    const empty: PlanCheck = check(plan('Sorcerer Boots', [esMana({ min: 17, max: 25 }), pureMana({ min: 40 })]));
+    assert.deepEqual(codes(empty), ['conflicting-ranges']);
+    assert.match(empty.problems[0]?.text ?? '', /Include 1 .*Include 2 .*maximum Mana.*total/);
+
+    // Hybrid mana ≥ 20 beside pure mana ≥ 40: a total of 40 or more, said in a note, not 60.
+    const both: PlanCheck = check(plan('Sorcerer Boots', [esMana({ min: 20 }), pureMana({ min: 40 })]));
+    assert.equal(both.ok, true);
+    assert.equal(both.notes.length, 1);
+    assert.match(both.notes[0]?.text ?? '', /total.*≥ 40/);
+    const spec: SlotSearchSpec = specOf(plan('Sorcerer Boots', [esMana({ min: 20 }), pureMana({ min: 40 })]));
+    const filters = compileQuery(spec, SEARCH).body.query.stats.find((g) => g.type === 'and')?.filters ?? [];
+    assert.deepEqual(
+        filters.filter((f) => f.id === S.mana),
+        [{ id: S.mana, value: { min: 40 } }],
+    );
+});
+
 test('a refused plan gives no spec', () => {
     const result: SlotSpecResult = buildSlotSpec(plan('Sorcerer Boots', [MS, LIFE, FLAT_ES, ES]), {
         context: bootsContext([]),
@@ -427,14 +474,15 @@ test('kept weights keep their order, and the pruning goes into the spec with its
     );
 });
 
-test('the user weight review is applied before the pruning', () => {
+test('the plan prunes before the weight review applies, as the review shows it (#111)', () => {
     const result: SlotSpecResult = buildSlotSpec(plan('Sorcerer Boots', [MS]), {
         context: {
             ...bootsContext([
                 [S.ms, 2],
                 [S.fire, 1],
             ]),
-            weightEdits: { [S.fire]: 4 },
+            // Movement speed is both off and included: it reads as pruned, at PoB's weight.
+            weightEdits: { [S.fire]: { factor: 4 }, [S.ms]: { off: true, factor: 3 } },
         },
         slotData: bootsData(),
     });
@@ -443,6 +491,10 @@ test('the user weight review is applied before the pruning', () => {
         assert.deepEqual(
             result.spec.weights.map((w) => [w.statId, w.weight]),
             [[S.fire, 4]],
+        );
+        assert.deepEqual(
+            result.spec.pruned.map((p) => [p.statId, p.weight, p.reason]),
+            [[S.ms, 2, 'included']],
         );
     }
 });
@@ -494,4 +546,114 @@ test('a slot only takes the item types it can hold', () => {
             assert.ok(categoryOf(t) !== undefined, `${t} has a category`);
         }
     }
+});
+
+test('weapon hands (#39): Weapon 2 takes only what fits beside Weapon 1; a Weapon 1 two-hander is noted', () => {
+    const w2 = (itemType: string | null): SlotPlan => ({ slot: 'Weapon 2', itemType: itemType, base: null, picks: [] });
+    const twoHanded = { weapon1Type: 'Two Handed Axe', weapon2Type: null };
+    // Beside a two-hander nothing goes in Weapon 2, not even an empty plan (every listing would be skipped).
+    const empty: PlanCheck = checkPlan(w2(null), 'Weapon 2', undefined, twoHanded);
+    assert.deepEqual(codes(empty), ['offhand-mismatch']);
+    assert.equal(empty.problems[0]?.text, 'Weapon 1 is two-handed (a Two Handed Axe): nothing goes in Weapon 2');
+    // A sword beside a wand, a quiver beside a sceptre: refused with what fits.
+    const sword: PlanCheck = checkPlan(w2('One Handed Sword'), 'Weapon 2', bootsData(), { weapon1Type: 'Wand', weapon2Type: 'Shield' });
+    assert.deepEqual(codes(sword), ['offhand-mismatch']);
+    assert.equal(sword.problems[0]?.text, "A One Handed Sword can't be held beside a Wand in Weapon 1: Weapon 2 takes Shield, Wand");
+    assert.deepEqual(codes(checkPlan(w2('Quiver'), 'Weapon 2', bootsData(), { weapon1Type: null, weapon2Type: null })), [
+        'offhand-mismatch',
+    ]);
+    // What fits goes on to the usual checks (here: the slot data is for boots).
+    assert.deepEqual(codes(checkPlan(w2('Shield'), 'Weapon 2', bootsData(), { weapon1Type: 'Wand', weapon2Type: null })), [
+        'slot-data-mismatch',
+    ]);
+    // An empty plan beside a one-hander, and any plan with no gear known, are not checked for hands.
+    assert.equal(checkPlan(w2(null), 'Weapon 2', undefined, { weapon1Type: 'Wand', weapon2Type: 'Shield' }).ok, true);
+    assert.equal(checkPlan(w2(null), 'Weapon 2', undefined).ok, true);
+
+    // Weapon 1: a bow beside a shield is fine, scored without the shield, and noted.
+    const bowData: SlotData = { ...bootsData(), baseType: 'Bow' };
+    const bow: PlanCheck = checkPlan({ slot: 'Weapon 1', itemType: 'Bow', base: null, picks: [] }, 'Weapon 1', bowData, {
+        weapon1Type: 'Sceptre',
+        weapon2Type: 'Shield',
+    });
+    assert.equal(bow.ok, true);
+    assert.deepEqual(
+        bow.notes.map((n) => n.code),
+        ['offhand-removed'],
+    );
+    assert.match(bow.notes[0]?.text ?? '', /^A Bow can't be held beside your shield: results are scored with Weapon 2 empty/);
+    // A bow beside a quiver: nothing to note.
+    const quiver: PlanCheck = checkPlan({ slot: 'Weapon 1', itemType: 'Bow', base: null, picks: [] }, 'Weapon 1', bowData, {
+        weapon1Type: 'Bow',
+        weapon2Type: 'Quiver',
+    });
+    assert.deepEqual(quiver.notes, []);
+});
+
+test('generic weapon types (#39): a category and totals, no slot data; noted beside an off-hand some results miss', () => {
+    const LIFE_TOTAL: string = 'pseudo.pseudo_total_life';
+    const any = (itemType: string, extra: Partial<SlotPlan> = {}): SlotPlan => ({
+        slot: 'Weapon 1',
+        itemType: itemType,
+        base: null,
+        picks: [],
+        ...extra,
+    });
+    const totals: Partial<SlotPlan> = { totals: [{ statId: LIFE_TOTAL, text: '+# total maximum Life', min: 50 }] };
+    // No slot data needed; a base or mods need one item type; defences have nothing to set.
+    assert.equal(checkPlan(any('Any weapon', totals), 'Weapon 1', undefined).ok, true);
+    assert.deepEqual(codes(checkPlan(any('Any weapon', { base: 'Spine Bow' }), 'Weapon 1', undefined)), ['generic-type']);
+    assert.deepEqual(codes(checkPlan(any('Any weapon', { picks: [LIFE] }), 'Weapon 1', undefined)), ['generic-type']);
+    assert.deepEqual(codes(checkPlan(any('Any weapon', { defences: { armour: { min: 100 } } }), 'Weapon 1', undefined)), ['no-defences']);
+    assert.deepEqual(codes(checkPlan({ ...any('Any weapon'), slot: 'Weapon 2' }, 'Weapon 2', undefined)), ['wrong-slot']);
+    assert.deepEqual(
+        codes(checkPlan(any('Any weapon', { totals: [{ statId: LIFE_TOTAL, text: 'life', min: 9, max: 1 }] }), 'Weapon 1', undefined)),
+        ['bad-total'],
+    );
+
+    // The spec searches the site's category and requires the totals.
+    const result: SlotSpecResult = buildSlotSpec(any('Two-handed melee', totals), {
+        context: { ...bootsContext([]), slot: 'Weapon 1', pobQuery: { category: { query: 'weapon.wand' }, query: { stats: [] } } },
+        slotData: undefined,
+    });
+    assert.equal(result.ok, true);
+    if (result.ok) {
+        assert.equal(result.spec.category, 'weapon.twomelee');
+        assert.equal(result.spec.baseType, null);
+        assert.ok(result.spec.requirements.some((r) => r.statId === LIFE_TOTAL && r.min === 50));
+    }
+
+    // Pruning: the total's own weight is a filter now; the rest stays (nothing is known about what can roll).
+    const { kept, pruned } = analysePlan(any('Any weapon', totals), 'Weapon 1', undefined).prune([
+        { statId: LIFE_TOTAL, weight: 1 },
+        { statId: S.life, weight: 1 },
+    ]);
+    assert.deepEqual(
+        pruned.map((w: PrunedWeight) => [w.statId, w.reason]),
+        [[LIFE_TOTAL, 'included']],
+    );
+    assert.deepEqual(
+        kept.map((w: WeightedStat) => w.statId),
+        [S.life],
+    );
+
+    // Beside a shield: one-handers fit, two-handers don't.
+    const shield = { weapon1Type: 'Wand', weapon2Type: 'Shield' };
+    assert.deepEqual(checkPlan(any('One-handed weapon'), 'Weapon 1', undefined, shield).notes, []);
+    const anyNote: string = checkPlan(any('Any weapon'), 'Weapon 1', undefined, shield).notes[0]?.text ?? '';
+    assert.equal(
+        anyNote,
+        "Some results can't be held beside your shield (Bow, Staff, Two Handed Axe and 2 more): those are scored with Weapon 2 empty, " +
+            'so their gain includes losing it. Results may look odd next to the rest',
+    );
+    assert.match(
+        checkPlan(any('Two-handed melee'), 'Weapon 1', undefined, shield).notes[0]?.text ?? '',
+        /^No two-handed melee can be held beside your shield: results are scored with Weapon 2 empty/,
+    );
+    // Beside a wand in Weapon 2: only wands fit, so one-handers are noted too. No off-hand: nothing to note.
+    assert.match(
+        checkPlan(any('One-handed weapon'), 'Weapon 1', undefined, { weapon1Type: 'Wand', weapon2Type: 'Wand' }).notes[0]?.text ?? '',
+        /^Some results can't be held beside your wand \(Claw, Dagger, One Handed Axe and 3 more\)/,
+    );
+    assert.deepEqual(checkPlan(any('Any weapon'), 'Weapon 1', undefined, { weapon1Type: 'Wand', weapon2Type: null }).notes, []);
 });

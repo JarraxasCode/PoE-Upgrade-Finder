@@ -13,7 +13,8 @@
 //      resources/app/apps/desktop/dist/  main.mjs (the bundle), preload.cjs
 //      resources/app/apps/desktop/src/data/  item art tables
 //      resources/app/apps/ui/dist/       the renderer (no source maps)
-//      resources/app/engine/             lua/, host/bin/luahost.exe, pob-pin.json, pob/<version>/ (LICENSE.md in it)
+//      resources/app/engine/             lua/, host/bin/luahost.exe, pob-pin.json, pob/<version>/ (LICENSE.md in it;
+//                                        only the manifest's files and the headless extras, see pobFiles)
 //    The app finds its root by walking up to engine/lua/dispatcher.lua, and PoB from the pin (engine-client).
 // 4. Compiles tools/launcher with the in-box csc.exe, the zip embedded as a resource.
 //
@@ -24,15 +25,48 @@ import { closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, 
 import { join, relative, resolve } from 'node:path';
 import { parseArgs } from 'node:util';
 import { build } from 'esbuild';
-import { parseManifest, readPin, verifyCopy, type PobPin } from '@poe-upgrade-finder/pob-update';
+import {
+    HEADLESS_FILES,
+    isSkipped,
+    parseManifest,
+    readPin,
+    verifyCopy,
+    type PobManifest,
+    type PobPin,
+} from '@poe-upgrade-finder/pob-update';
 import { ZipWriter } from '../../apps/desktop/src/services/zip.ts';
-import { setFuse } from '../electron-fuses/fuses.ts';
+import { type FuseName, setFuse } from '../electron-fuses/fuses.ts';
 import { describeError } from '@poe-upgrade-finder/validate';
 
 const ROOT: string = resolve(import.meta.dirname, '..', '..');
 const OUT: string = join(ROOT, 'out', 'package');
 const ELECTRON_DIST: string = join(ROOT, 'node_modules', 'electron', 'dist');
 export const APP_EXE: string = 'poe-upgrade-finder.exe';
+
+/** The fuses set on our copy of electron.exe; everything else in it is Electron's. */
+export const APP_FUSES: readonly { readonly name: FuseName; readonly on: boolean }[] = [
+    { name: 'EnableCookieEncryption', on: true },
+    { name: 'RunAsNode', on: false },
+];
+
+/** Electron's exe as we ship it: the fuses above set on a copy. */
+export function appExe(electronExe: Buffer): Buffer {
+    const exe: Buffer = Buffer.from(electronExe);
+    for (const fuse of APP_FUSES) {
+        setFuse(exe, fuse.name, fuse.on);
+    }
+    return exe;
+}
+
+/**
+ * The PoB files that ship: the manifest's files (less tree images and assets, which headless PoB never
+ * opens), the headless extras, and manifest.xml itself (the in-app update reads it). Anything else in the
+ * copy is left out: PoB writes caches there during dev runs (v0.2.0 shipped a TimelessJewelData .bin).
+ */
+export function pobFiles(manifest: PobManifest): readonly string[] {
+    const listed: string[] = manifest.files.map((f) => f.path).filter((p: string) => !isSkipped(p));
+    return [...listed, ...HEADLESS_FILES, 'manifest.xml'];
+}
 
 interface ZipSource {
     /** Name inside the zip, forward slashes. */
@@ -102,7 +136,8 @@ async function main(): Promise<number> {
     if (!existsSync(join(pobDir, 'manifest.xml'))) {
         throw new Error(`${pobDir} is missing: build it with tools/pob-update (--tag ${pin.tag})`);
     }
-    const bad: readonly string[] = await verifyCopy(pobDir, parseManifest(readFileSync(join(pobDir, 'manifest.xml'), 'utf8')), true);
+    const manifest: PobManifest = parseManifest(readFileSync(join(pobDir, 'manifest.xml'), 'utf8'));
+    const bad: readonly string[] = await verifyCopy(pobDir, manifest, true);
     if (bad.length > 0) {
         throw new Error(`the PoB copy doesn't match its manifest: ${bad.slice(0, 5).join(', ')}`);
     }
@@ -134,9 +169,7 @@ async function main(): Promise<number> {
     });
 
     // 3. The zip.
-    const exe: Buffer = readFileSync(join(ELECTRON_DIST, 'electron.exe'));
-    setFuse(exe, 'EnableCookieEncryption', true);
-    setFuse(exe, 'RunAsNode', false);
+    const exe: Buffer = appExe(readFileSync(join(ELECTRON_DIST, 'electron.exe')));
     const appPackage: Buffer = Buffer.from(
         `${JSON.stringify({ name: productName, productName: productName, version: version, private: true, type: 'module', main: 'apps/desktop/dist/main.mjs' }, null, 2)}\n`,
     );
@@ -153,8 +186,14 @@ async function main(): Promise<number> {
         { name: `${app}assets/icon/icon.ico`, path: join(ROOT, 'assets', 'icon', 'icon.ico') },
         { name: `${app}engine/host/bin/luahost.exe`, path: luahost },
         { name: `${app}engine/pob-pin.json`, path: join(ROOT, 'engine', 'pob-pin.json') },
-        ...tree(pobDir, `${app}engine/pob/${pin.version}/`),
+        ...pobFiles(manifest).map((p: string) => ({ name: `${app}engine/pob/${pin.version}/${p}`, path: join(pobDir, p) })),
     ];
+    const strays: readonly string[] = tree(pobDir, '')
+        .map((s: ZipSource) => s.name)
+        .filter((n: string) => !pobFiles(manifest).includes(n));
+    if (strays.length > 0) {
+        console.log(`left out of the PoB copy (not in its manifest): ${strays.join(', ')}`);
+    }
     for (const source of sources) {
         if (source.name.includes('..') || source.name.includes('\\')) {
             throw new Error(`bad zip name ${source.name}`);
@@ -213,12 +252,14 @@ async function main(): Promise<number> {
     return 0;
 }
 
-main().then(
-    (code: number) => {
-        process.exitCode = code;
-    },
-    (error: unknown) => {
-        console.error(describeError(error));
-        process.exitCode = 1;
-    },
-);
+if (import.meta.main) {
+    main().then(
+        (code: number) => {
+            process.exitCode = code;
+        },
+        (error: unknown) => {
+            console.error(describeError(error));
+            process.exitCode = 1;
+        },
+    );
+}

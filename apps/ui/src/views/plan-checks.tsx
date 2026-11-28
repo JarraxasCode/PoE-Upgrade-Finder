@@ -1,10 +1,11 @@
 // The slot plan in the Run view (issue #6): what the run searched with (the header card), and on each find
-// which of its lines met each include, hard need, exclude and defence. The site filtered every result on
+// which of its lines met each include, hard need, exclude, defence and socket filter. The site filtered every result on
 // these already; a "missed" means the app's reading of the site's rules is off for that item, not that the
 // item was let through on purpose.
 
 import type { JSX } from 'preact';
 import type { RunHeader, UiPlanCheck, UiPlanRule, UiRunPlan } from '@poe-upgrade-finder/ipc';
+import { anyOfType } from '@poe-upgrade-finder/vocab';
 import { chipValue, PLAN_MARK, planCheckText, planChip } from '../run-model.ts';
 import type { PlanChip as PlanChipModel } from '../run-model.ts';
 import { Info } from './item-card.tsx';
@@ -14,10 +15,11 @@ const KIND_TEXT: Readonly<Record<UiPlanCheck['kind'], string>> = {
     need: 'Build needs',
     exclude: 'Exclude',
     defence: 'Defence',
+    socket: 'Sockets',
 };
 
 const QUALITY_TIP: string =
-    'The trade site compares defences at 20% quality: an item below 20% counts as listed × 1.2 / (1 + quality). PoB scores the item as it is listed.';
+    'The trade site compares defences at 20% quality: an item below 20% counts as listed × 1.2 / (1 + quality). PoB also scores the item at 20% quality, unless it is corrupted or mirrored, so its gain assumes you add the quality.';
 
 /** The chip on a find's row: hover for each check. */
 export function PlanChip(props: { readonly tipKey: string; readonly checks: readonly UiPlanCheck[] }): JSX.Element | null {
@@ -102,7 +104,8 @@ export function RunPlanSummary(props: { readonly header: RunHeader }): JSX.Eleme
             {p !== null && (
                 <>
                     <p>
-                        <strong>Slot plan:</strong> {p.base ?? `any ${p.itemType ?? h.slot} base`}
+                        <strong>Slot plan:</strong>{' '}
+                        {p.base ?? (p.itemType === null ? `Any ${h.slot.toLowerCase()} base` : anyOfType(p.itemType))}
                         {p.influences.length > 0 && <span class="muted"> · {p.influences.join(' and ')}</span>}
                     </p>
                     {p.includes.length > 0 && (
@@ -144,6 +147,7 @@ export function RunPlanSummary(props: { readonly header: RunHeader }): JSX.Eleme
                     ))}
                 </>
             )}
+            {h.sockets.length > 0 && <p>Socket filters: {h.sockets.join(', ')}</p>}
             <p class="muted">Required level: {h.levelFilter}</p>
         </div>
     );

@@ -1,55 +1,10 @@
-// An item as the tooltip draws it (PLAN.md, Phase 4): a find from the trade site, or (later) an equipped
-// item from the PoB save. Same shape as `ItemDisplay` in packages/trade, which main assigns straight in;
-// it is declared again here because the renderer bundles this package and must not pull in the trade code.
+// The check on an item as the tooltip draws it (PLAN.md, Phase 4; the shape is vocab's ItemView): a find
+// from the trade site, or an equipped item from the PoB save.
 
 import { array, boolean, oneOf, record, string, ValidationError } from '@poe-upgrade-finder/validate';
 import type { JsonRecord } from '@poe-upgrade-finder/validate';
-
-export type ViewTone = 'plain' | 'augmented' | 'unmet' | 'fire' | 'cold' | 'lightning' | 'chaos' | 'label';
-const TONES: readonly ViewTone[] = ['plain', 'augmented', 'unmet', 'fire', 'cold', 'lightning', 'chaos', 'label'];
-
-export interface ViewPart {
-    readonly text: string;
-    readonly tone: ViewTone;
-}
-
-export type ViewLine = readonly ViewPart[];
-
-export type ViewModKind = 'enchant' | 'implicit' | 'explicit' | 'crafted' | 'fractured' | 'scourge' | 'crucible';
-const MOD_KINDS: readonly ViewModKind[] = ['enchant', 'implicit', 'explicit', 'crafted', 'fractured', 'scourge', 'crucible'];
-
-export interface ViewMod {
-    readonly text: string;
-    readonly kind: ViewModKind;
-}
-
-export type ViewRarity = 'normal' | 'magic' | 'rare' | 'unique' | 'other';
-const RARITIES: readonly ViewRarity[] = ['normal', 'magic', 'rare', 'unique', 'other'];
-
-export type ViewInfluence = 'shaper' | 'elder' | 'crusader' | 'redeemer' | 'hunter' | 'warlord' | 'searing' | 'tangled';
-const INFLUENCES: readonly ViewInfluence[] = ['shaper', 'elder', 'crusader', 'redeemer', 'hunter', 'warlord', 'searing', 'tangled'];
-
-export interface ItemView {
-    /** An image on web.poecdn.com, or null. */
-    readonly icon: string | null;
-    readonly width: number;
-    readonly height: number;
-    readonly rarity: ViewRarity;
-    readonly name: string;
-    readonly typeLine: string;
-    readonly influences: readonly ViewInfluence[];
-    readonly properties: readonly ViewLine[];
-    readonly requirements: ViewLine;
-    readonly sockets: string;
-    readonly itemLevel: number | null;
-    readonly enchants: readonly ViewMod[];
-    readonly implicits: readonly ViewMod[];
-    readonly explicits: readonly ViewMod[];
-    readonly corrupted: boolean;
-    readonly mirrored: boolean;
-}
-
-export const ICON_PREFIX: string = 'https://web.poecdn.com/';
+import { ICON_ORIGIN, ITEM_INFLUENCES, ITEM_MOD_KINDS, ITEM_RARITIES, ITEM_TONES } from '@poe-upgrade-finder/vocab';
+import type { ItemLine, ItemMod, ItemPart, ItemView } from '@poe-upgrade-finder/vocab';
 
 function cells(value: unknown, path: string): number {
     if (typeof value !== 'number' || !Number.isInteger(value) || value < 1 || value > 8) {
@@ -58,18 +13,18 @@ function cells(value: unknown, path: string): number {
     return value;
 }
 
-function part(value: unknown, path: string): ViewPart {
+function part(value: unknown, path: string): ItemPart {
     const r: JsonRecord = record(value, path);
-    return { text: string(r['text'], `${path}.text`), tone: oneOf(r['tone'], `${path}.tone`, TONES) };
+    return { text: string(r['text'], `${path}.text`), tone: oneOf(r['tone'], `${path}.tone`, ITEM_TONES) };
 }
 
-function line(value: unknown, path: string): ViewLine {
+function line(value: unknown, path: string): ItemLine {
     return array(value, path, part);
 }
 
-function mod(value: unknown, path: string): ViewMod {
+function mod(value: unknown, path: string): ItemMod {
     const r: JsonRecord = record(value, path);
-    return { text: string(r['text'], `${path}.text`), kind: oneOf(r['kind'], `${path}.kind`, MOD_KINDS) };
+    return { text: string(r['text'], `${path}.text`), kind: oneOf(r['kind'], `${path}.kind`, ITEM_MOD_KINDS) };
 }
 
 /** An image URL on web.poecdn.com, or null; anything else is refused. */
@@ -78,8 +33,8 @@ export function readIcon(value: unknown, path: string): string | null {
         return null;
     }
     const url: string = string(value, path);
-    if (!url.startsWith(ICON_PREFIX)) {
-        throw new ValidationError(`${path}: icons come from ${ICON_PREFIX} only`);
+    if (!url.startsWith(ICON_ORIGIN)) {
+        throw new ValidationError(`${path}: icons come from ${ICON_ORIGIN} only`);
     }
     return url;
 }
@@ -94,10 +49,10 @@ export function readItemView(value: unknown, path: string): ItemView {
         icon: readIcon(r['icon'], `${path}.icon`),
         width: cells(r['width'], `${path}.width`),
         height: cells(r['height'], `${path}.height`),
-        rarity: oneOf(r['rarity'], `${path}.rarity`, RARITIES),
+        rarity: oneOf(r['rarity'], `${path}.rarity`, ITEM_RARITIES),
         name: string(r['name'], `${path}.name`),
         typeLine: string(r['typeLine'], `${path}.typeLine`),
-        influences: array(r['influences'], `${path}.influences`, (v: unknown, p: string) => oneOf(v, p, INFLUENCES)),
+        influences: array(r['influences'], `${path}.influences`, (v: unknown, p: string) => oneOf(v, p, ITEM_INFLUENCES)),
         properties: array(r['properties'], `${path}.properties`, line),
         requirements: line(r['requirements'], `${path}.requirements`),
         sockets: string(r['sockets'], `${path}.sockets`),

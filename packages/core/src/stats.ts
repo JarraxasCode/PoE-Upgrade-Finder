@@ -1,16 +1,12 @@
 // PoB's numbers as the engine returns them (structurally the engine client's StatBlock), and small readers.
 // Keys are PoB's output names (PLAN.md, "What we read"). A key PoB left out is absent.
 
+import type { Element } from '@poe-upgrade-finder/vocab';
+
 export interface PobStats {
     readonly damage: number;
     readonly values: Readonly<Record<string, number | boolean>>;
 }
-
-export type Element = 'Fire' | 'Cold' | 'Lightning';
-export const ELEMENTS: readonly Element[] = ['Fire', 'Cold', 'Lightning'];
-
-export type Attribute = 'Str' | 'Dex' | 'Int';
-export const ATTRIBUTES: readonly Attribute[] = ['Str', 'Dex', 'Int'];
 
 /** A numeric key, or undefined when PoB left it out (or it isn't a number). */
 export function stat(stats: PobStats, key: string): number | undefined {

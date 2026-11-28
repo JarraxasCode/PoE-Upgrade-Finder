@@ -12,15 +12,16 @@
 import { createHash } from 'node:crypto';
 import { DatabaseSync } from 'node:sqlite';
 import type { StatementSync } from 'node:sqlite';
-import { readSlotData, readTradeQuery } from '@poe-upgrade-finder/engine-client';
-import type { SlotData, TargetRequest, TradeQueryData } from '@poe-upgrade-finder/engine-client';
+import { readSlotData, readTradeQuery, readUniques } from '@poe-upgrade-finder/engine-client';
+import type { SlotData, TargetRequest, TradeQueryData, UniquesData } from '@poe-upgrade-finder/engine-client';
 import { readStatList } from '@poe-upgrade-finder/trade';
 import type { DivineRate, RateStore, TradeStatEntry } from '@poe-upgrade-finder/trade';
 import { array, isRecord } from '@poe-upgrade-finder/validate';
 import { readBuildSummary, readEquippedInfo } from '@poe-upgrade-finder/ipc';
 import type { BuildSummary, EquippedInfo } from '@poe-upgrade-finder/ipc';
+import type { WeightSource } from '@poe-upgrade-finder/vocab';
 
-const SCHEMA_VERSION: number = 5;
+const SCHEMA_VERSION: number = 6;
 /** Builds whose gear is remembered. */
 const EQUIPPED_KEEP: number = 50;
 /** Build summaries kept (newest first). */
@@ -35,13 +36,18 @@ export interface GeneratorKey {
     readonly target: TargetRequest;
     readonly blend: number;
     readonly pobVersion: string;
+    /** Which generator made the weights (issue #47). */
+    readonly source: WeightSource;
 }
 
 /**
  * Bumped when what the generator runs on changes without the PoB version changing. 2: QueryMods.lua is now
- * rebuilt with PoB's own code (Phase 5), so weights cached from PoB's shipped table are dropped.
+ * rebuilt with PoB's own code (Phase 5), so weights cached from PoB's shipped table are dropped. 3: the
+ * generator's base is calculated under the damage target (#109), so weights cached for a picked skill, measured
+ * against the saved main skill, are dropped; and PoB gets one mod entry per trade stat (V23), so cached weights
+ * from a random pick are dropped too.
  */
-const GENERATOR_DATA: number = 2;
+const GENERATOR_DATA: number = 3;
 
 /** Bumped when the slotData command's output changes without the PoB version changing. */
 const SLOT_DATA_FORMAT: number = 3;
@@ -66,7 +72,43 @@ export function summaryKey(key: SummaryKey): string {
 }
 
 export function generatorKey(key: GeneratorKey): string {
-    const text: string = JSON.stringify([key.xmlHash, key.slot, key.target, key.blend, key.pobVersion, GENERATOR_DATA]);
+    const parts: unknown[] = [key.xmlHash, key.slot, key.target, key.blend, key.pobVersion, GENERATOR_DATA];
+    // PoB's keys hash as they did before the source was part of the key, so cached rows still hit (V23: a new
+    // generator run could give different weights). Any other source is its own key.
+    if (key.source !== 'pob') {
+        parts.push(key.source);
+    }
+    const text: string = JSON.stringify(parts);
+    return createHash('sha256').update(text).digest('hex');
+}
+
+/** What a uniques result depends on (#113); the engine's uniques code version too. */
+export interface UniquesKey {
+    readonly xmlHash: string;
+    readonly slot: string;
+    readonly itemType: string;
+    readonly target: TargetRequest;
+    readonly blend: number;
+    readonly pobVersion: string;
+}
+
+/**
+ * Bumped when the uniques command's output or rules change without the PoB version changing. 2: a line's site
+ * value counts only the site's "#" numbers, and `rolls` was added (#113 review).
+ */
+const UNIQUES_DATA: number = 2;
+
+export function uniquesKey(key: UniquesKey): string {
+    const text: string = JSON.stringify([
+        'uniques',
+        key.xmlHash,
+        key.slot,
+        key.itemType,
+        key.target,
+        key.blend,
+        key.pobVersion,
+        UNIQUES_DATA,
+    ]);
     return createHash('sha256').update(text).digest('hex');
 }
 
@@ -163,6 +205,31 @@ export class CacheDb {
             .run(key, value, Date.now());
         this.db
             .prepare('DELETE FROM generator WHERE key NOT IN (SELECT key FROM generator ORDER BY created_at DESC LIMIT ?)')
+            .run(GENERATOR_KEEP);
+    }
+
+    /** The uniques for this build, slot, item type, target and blend, if listed before (#113). */
+    public uniques(key: string): UniquesData | undefined {
+        const row: unknown = this.db.prepare('SELECT value FROM uniques WHERE key = ?').get(key);
+        if (row === undefined) {
+            return undefined;
+        }
+        try {
+            return readUniques(parseJson(isRecord(row) ? row['value'] : undefined));
+        } catch {
+            this.db.prepare('DELETE FROM uniques WHERE key = ?').run(key);
+            return undefined;
+        }
+    }
+
+    public saveUniques(key: string, data: UniquesData): void {
+        this.db
+            .prepare(
+                'INSERT INTO uniques (key, value, created_at) VALUES (?, ?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value, created_at = excluded.created_at',
+            )
+            .run(key, JSON.stringify(data), Date.now());
+        this.db
+            .prepare('DELETE FROM uniques WHERE key NOT IN (SELECT key FROM uniques ORDER BY created_at DESC LIMIT ?)')
             .run(GENERATOR_KEEP);
     }
 
@@ -267,8 +334,9 @@ export class CacheDb {
         this.db.prepare('DELETE FROM slot_data WHERE pob_version <> ?').run(version);
     }
 
-    /** Forgets every cached generator result (Settings, or after a PoB update). */
+    /** Forgets every cached generator result, and the uniques measured the same way (Settings, or after a PoB update). */
     public clearGenerator(): number {
+        this.db.prepare('DELETE FROM uniques').run();
         return Number(this.db.prepare('DELETE FROM generator').run().changes);
     }
 
@@ -286,6 +354,7 @@ export class CacheDb {
             CREATE TABLE IF NOT EXISTS equipped (build_id TEXT PRIMARY KEY, value TEXT NOT NULL, saved_at INTEGER NOT NULL);
             CREATE TABLE IF NOT EXISTS slot_data (pob_version TEXT NOT NULL, base_type TEXT NOT NULL, value TEXT NOT NULL, saved_at INTEGER NOT NULL, PRIMARY KEY (pob_version, base_type));
             CREATE TABLE IF NOT EXISTS build_summary (key TEXT PRIMARY KEY, value TEXT NOT NULL, saved_at INTEGER NOT NULL);
+            CREATE TABLE IF NOT EXISTS uniques (key TEXT PRIMARY KEY, value TEXT NOT NULL, created_at INTEGER NOT NULL);
         `);
         this.db
             .prepare("INSERT INTO meta (key, value) VALUES ('schema', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value")

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { DEFAULT_FLOORS, floorChecks, readFloorSettings, stripNeeds } from '../src/floors.ts';
+import { DEFAULT_FLOORS, floorChecks, stripNeeds } from '../src/floors.ts';
 import type { CheckResult, ItemCheck, SearchRequirement } from '../src/spec.ts';
 import { baseStats } from './fixtures.ts';
 
@@ -111,15 +111,43 @@ test('strip needs: nothing when the strip keeps the floors, or the floor already
     );
 });
 
-test('floor settings from JSON: fields checked, null turns a default off, unknown fields refused', () => {
-    const f = readFloorSettings({ chaosResMin: 40, spellBlockMin: null, maxResMin: { Fire: 85, Cold: 76 }, targets: { overcapMin: 5 } });
-    assert.equal(f.chaosResMin, 40);
-    assert.equal('spellBlockMin' in f, false);
-    assert.deepEqual(f.maxResMin, { Fire: 85, Cold: 76 });
-    assert.deepEqual(f.targets, { overcapMin: 5 });
-    assert.equal(f.elementalResCapped, true, 'untouched defaults stay');
-    assert.throws(() => readFloorSettings({ chaosRes: 40 }), /floors\.chaosRes: unknown floor setting/);
-    assert.throws(() => readFloorSettings({ chaosResMin: '40' }), /floors\.chaosResMin: expected a number/);
-    assert.throws(() => readFloorSettings({ maxResMin: { Chaos: 80 } }), /not an element/);
-    assert.throws(() => readFloorSettings([]), /expected an object/);
+// #34: the gap is in the build's total, the filter on the item's own; scaling on the build can make the gap
+// bigger than any item. Capped at what the current item carries, an item like it always meets the need.
+const CHAOS_GAP = baseStats({ ChaosResist: 6, ChaosResistTotal: 6 }); // floor 50: gap 44
+
+test('strip needs: capped at the item own total, with the gap kept', () => {
+    assert.deepEqual(stripNeeds(DEFAULT_FLOORS, baseStats(), CHAOS_GAP, { Chaos: 22 }), [
+        {
+            statId: 'pseudo.pseudo_total_chaos_resistance',
+            min: 22,
+            gap: 44,
+            origin: 'strip',
+            label: 'Required: chaos res ≥ 22, from strip',
+        },
+    ]);
+});
+
+test('strip needs: a need under the item own total is not capped', () => {
+    assert.deepEqual(stripNeeds(DEFAULT_FLOORS, baseStats(), CHAOS_GAP, { Chaos: 60 }), [
+        { statId: 'pseudo.pseudo_total_chaos_resistance', min: 44, origin: 'strip', label: 'Required: chaos res ≥ 44, from strip' },
+    ]);
+});
+
+test('strip needs: dropped when the item carries none of it', () => {
+    const stripped = baseStats({
+        ChaosResist: 6,
+        ChaosResistTotal: 6,
+        ColdResist: 59,
+        MissingColdResist: 16,
+        ColdResistTotal: 59,
+        Str: 80,
+        ReqStr: 98,
+    });
+    assert.deepEqual(stripNeeds(DEFAULT_FLOORS, baseStats(), stripped, { Chaos: 0, Cold: 0, Str: -5 }), []);
+});
+
+test('strip needs: a total the item has no key for leaves the need as it was', () => {
+    assert.deepEqual(stripNeeds(DEFAULT_FLOORS, baseStats(), CHAOS_GAP, { Fire: 10 }), [
+        { statId: 'pseudo.pseudo_total_chaos_resistance', min: 44, origin: 'strip', label: 'Required: chaos res ≥ 44, from strip' },
+    ]);
 });

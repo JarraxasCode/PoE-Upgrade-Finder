@@ -3,21 +3,8 @@
 
 import type { JSX, TargetedEvent } from 'preact';
 import { useEffect, useState } from 'preact/hooks';
-import { GEAR_SLOTS, MAX_CHARACTER_LEVEL, parseBudgetText } from '@poe-upgrade-finder/ipc';
-import type {
-    AppSettings,
-    BuildEntry,
-    BuildSettings,
-    BuildState,
-    BuildsList,
-    BuildSummary,
-    EquippedInfo,
-    GearSlot,
-    LevelFilter,
-    ListingType,
-    SearchDepth,
-    SlotPlan,
-} from '@poe-upgrade-finder/ipc';
+import { parseBudgetText } from '@poe-upgrade-finder/ipc';
+import type { AppSettings, BuildEntry, BuildSettings, BuildState, BuildsList, BuildSummary, EquippedInfo } from '@poe-upgrade-finder/ipc';
 import { ago, buildLabel, compact, grouped } from '../format.ts';
 import { CLASS_ART, CLASS_ART_SHEET } from '../class-art.ts';
 import type { ClassArtTile } from '../class-art.ts';
@@ -27,6 +14,7 @@ import {
     buildsList,
     buildState,
     rememberForBuild,
+    saveForBuild,
     selectBuild,
     selectedBuildId,
     setSlot,
@@ -43,9 +31,24 @@ import { HoverItem, ItemImage } from './item-card.tsx';
 import { LimitsStrip } from './limits.tsx';
 import { BuildChecksCard, checksSummary, openChecks } from './build-checks-card.tsx';
 import { SlotPlanCard } from './slot-plan-card.tsx';
+import { UniquePicker } from './unique-picker.tsx';
+import { SocketFilters } from './socket-filters.tsx';
+import { runPlanFor, uniqueItemType } from '../slot-plan-model.ts';
+import { setUniqueMode, uniqueChoiceFor } from '../state/uniques.ts';
 import { WeightReview } from './weight-review.tsx';
 import { weightPreview } from '../state/weights.ts';
 import { RateLine, SignInLine, TradeError } from './trade-status.tsx';
+import { GEAR_SLOTS, MAX_CHARACTER_LEVEL, THOROUGH_NOTE, weightCounts } from '@poe-upgrade-finder/vocab';
+import type {
+    GearSlot,
+    LevelFilter,
+    ListingType,
+    SearchDepth,
+    SlotPlan,
+    UniqueChoice,
+    UniqueMode,
+    WeightEdits,
+} from '@poe-upgrade-finder/vocab';
 
 const DEPTH_LABELS: Readonly<Record<SearchDepth, string>> = {
     thorough: 'Thorough (100 per band)',
@@ -276,6 +279,7 @@ function Options(props: { readonly settings: AppSettings }): JSX.Element {
                         </option>
                     ))}
                 </select>
+                {depth === 'thorough' && <p class="muted small">{THOROUGH_NOTE}</p>}
             </div>
             <div class="field check">
                 <span class="label">Listings</span>
@@ -311,7 +315,7 @@ function LevelField(props: { readonly settings: BuildSettings; readonly level: n
     const typed: number | undefined = parseLevel(text);
     const mine: string = props.level === null ? 'my level' : `my level (${props.level})`;
     const save = (next: LevelFilter): void => {
-        void rememberForBuild({ levelFilter: next });
+        void saveForBuild({ levelFilter: next });
     };
     return (
         <div class="field level-field">
@@ -499,6 +503,20 @@ interface SearchButtonProps {
     readonly perBuild: BuildSettings;
     readonly summary: BuildSummary | undefined;
     readonly slot: GearSlot | null;
+    readonly equipped: readonly EquippedInfo[];
+}
+
+/** The plan the search sends for the slot: the rare plan, or the picked unique (#113); null: nothing picked yet. */
+function searchPlan(slot: GearSlot, equipped: readonly EquippedInfo[]): SlotPlan | null {
+    const rare: SlotPlan = planFor(slot);
+    const choice: UniqueChoice | undefined = uniqueChoiceFor(slot);
+    return runPlanFor(slot, rare, choice, slotUniqueType(slot, equipped));
+}
+
+/** The item type a unique search lists uniques for, from the rare plan and the gear. */
+function slotUniqueType(slot: GearSlot, equipped: readonly EquippedInfo[]): string {
+    const typeIn = (s: GearSlot): string | null => equipped.find((e: EquippedInfo) => e.slot === s)?.itemType ?? null;
+    return uniqueItemType(slot, planFor(slot), typeIn(slot), typeIn('Weapon 1'));
 }
 
 /** Why the button can't start a run yet, or undefined when it can. */
@@ -527,8 +545,15 @@ function blocker(props: SearchButtonProps, budget: string): string | undefined {
     if (signIn.value.status !== 'signed-in') {
         return 'Waiting for the sign-in check';
     }
+    if (run.value !== null && isLive(run.value.phase)) {
+        return 'A run is going';
+    }
+    // A unique search has its own weights, so the weight review's checks don't apply (#113).
+    if (uniqueChoiceFor(props.slot)?.mode === 'unique') {
+        return searchPlan(props.slot, props.equipped) === null ? 'Pick a unique' : undefined;
+    }
     const wp = weightPreview.value;
-    const edits: Readonly<Record<string, number>> = props.perBuild.weightEdits[props.slot] ?? {};
+    const edits: WeightEdits = props.perBuild.weightEdits[props.slot] ?? {};
     const plan: SlotPlan = planFor(props.slot);
     if (wp.kind === 'loading' && !isEmptySlotPlan(plan)) {
         return 'Checking the slot plan';
@@ -543,12 +568,9 @@ function blocker(props: SearchButtonProps, budget: string): string | undefined {
         wp.preview.slot === props.slot &&
         wp.preview.weights.length > 0 &&
         !plan.picks.some((p) => p.rule === 'include') &&
-        wp.preview.weights.every((w) => edits[w.statId] === 0 || pruned.has(w.statId))
+        weightCounts(wp.preview.weights, edits, pruned).on === 0
     ) {
         return 'Turn at least one stat on';
-    }
-    if (run.value !== null && isLive(run.value.phase)) {
-        return 'A run is going';
     }
     return undefined;
 }
@@ -568,12 +590,13 @@ function SearchButton(props: SearchButtonProps): JSX.Element {
     const why: string | undefined = blocker(props, budget);
     const start = async (): Promise<void> => {
         const id: string | null = selectedBuildId.value;
-        if (id === null || props.slot === null || props.summary === undefined) {
+        const plan: SlotPlan | null = props.slot === null ? null : searchPlan(props.slot, props.equipped);
+        if (id === null || plan === null || props.summary === undefined) {
             return;
         }
         const header = await startRun({
             buildId: id,
-            slots: [planFor(props.slot)],
+            slots: [plan],
             budget: budget,
             minBudget: minBudgetOf(props.perBuild),
             target: props.summary.targetId,
@@ -587,7 +610,12 @@ function SearchButton(props: SearchButtonProps): JSX.Element {
     return (
         <div class="actions column">
             <button type="button" class="btn primary big" disabled={why !== undefined || state.busy} onClick={() => void start()}>
-                {state.busy ? 'Preparing: PoB strips the slot and builds the search…' : (why ?? `Find upgrades for ${props.slot ?? ''}`)}
+                {state.busy
+                    ? 'Preparing: PoB strips the slot and builds the search…'
+                    : (why ??
+                      (props.slot !== null && uniqueChoiceFor(props.slot)?.mode === 'unique'
+                          ? `Find ${uniqueChoiceFor(props.slot)?.unique?.name ?? 'the unique'}`
+                          : `Find upgrades for ${props.slot ?? ''}`))}
             </button>
             {state.busy && (
                 <button type="button" class="btn" onClick={cancelRun}>
@@ -614,6 +642,36 @@ function SearchButton(props: SearchButtonProps): JSX.Element {
     );
 }
 
+const MODE_LABELS: Readonly<Record<UniqueMode, string>> = { rare: 'Rare', unique: 'Unique' };
+
+/** Rare (the slot plan) or Unique (one picked unique) for the slot (#113). Both are kept; the switch picks one. */
+function RarityModeSwitch(props: { readonly slot: GearSlot }): JSX.Element {
+    const mode: UniqueMode = uniqueChoiceFor(props.slot)?.mode ?? 'rare';
+    return (
+        <div class="mode-switch" role="radiogroup" aria-label={`What to search for on ${props.slot}`}>
+            {(['rare', 'unique'] as const).map((m: UniqueMode) => (
+                <button
+                    key={m}
+                    type="button"
+                    role="radio"
+                    aria-checked={mode === m}
+                    class={`mode-option${mode === m ? ' on' : ''}`}
+                    onClick={() => {
+                        setUniqueMode(props.slot, m);
+                    }}
+                >
+                    {MODE_LABELS[m]}
+                </button>
+            ))}
+            <span class="muted small">
+                {mode === 'rare'
+                    ? "Rare items, by the slot plan and PoB's weights."
+                    : 'One unique: its best-value copies, by its own rolls.'}
+            </span>
+        </div>
+    );
+}
+
 export function SearchView(): JSX.Element {
     const list = buildsList.value;
     const settings: AppSettings | undefined = readyValue(appSettings.value);
@@ -628,6 +686,14 @@ export function SearchView(): JSX.Element {
     // While PoB loads, the gear it reported last time (main's cache), so the images show at once.
     const equipped: readonly EquippedInfo[] =
         summary?.equipped ?? (state.kind === 'loading' && state.buildId === selectedBuildId.value ? (state.equipped ?? []) : []);
+    // The plan editor needs the build's gear (the item types depend on it): the live load's, or the cached one.
+    const gearKnown: boolean =
+        summary !== undefined || (state.kind === 'loading' && state.buildId === selectedBuildId.value && state.equipped !== null);
+    const planWaiting: string | null = gearKnown
+        ? null
+        : state.kind === 'error' && state.buildId === selectedBuildId.value
+          ? "PoB didn't load the build, so the plan can't be edited: see the message above."
+          : 'Waiting for PoB to load the build…';
     const slot: GearSlot | null = perBuild?.lastSlot ?? null;
     return (
         <section class="page">
@@ -690,7 +756,7 @@ export function SearchView(): JSX.Element {
                                         Edit
                                     </button>
                                 </p>
-                                <SearchButton settings={settings} perBuild={perBuild} summary={summary} slot={slot} />
+                                <SearchButton settings={settings} perBuild={perBuild} summary={summary} slot={slot} equipped={equipped} />
                                 <div class="status">
                                     {signIn.value.status !== 'signed-in' && <SignInLine />}
                                     <RateLine />
@@ -702,11 +768,33 @@ export function SearchView(): JSX.Element {
                     {perBuild !== undefined && selectedBuildId.value !== null && (
                         <BuildChecksCard key={selectedBuildId.value} buildId={selectedBuildId.value} saved={perBuild} />
                     )}
-                    {perBuild !== undefined && slot !== null && (
+                    {perBuild !== undefined && slot !== null && <RarityModeSwitch slot={slot} />}
+                    {perBuild !== undefined && slot !== null && uniqueChoiceFor(slot)?.mode === 'unique' && (
+                        <div class="plan-grid">
+                            {shown !== undefined && selectedBuildId.value !== null ? (
+                                <UniquePicker
+                                    buildId={selectedBuildId.value}
+                                    slot={slot}
+                                    target={shown.targetId}
+                                    itemType={slotUniqueType(slot, equipped)}
+                                />
+                            ) : (
+                                <div class="card unique-card">
+                                    <p class="muted">The uniques show once PoB has loaded the build.</p>
+                                </div>
+                            )}
+                            <div class="card socket-card">
+                                <SocketFilters plan={planFor(slot)} />
+                            </div>
+                        </div>
+                    )}
+                    {perBuild !== undefined && slot !== null && uniqueChoiceFor(slot)?.mode !== 'unique' && (
                         <div class="plan-grid">
                             <SlotPlanCard
                                 slot={slot}
                                 equippedType={equipped.find((e: EquippedInfo) => e.slot === slot)?.itemType ?? null}
+                                weapon1Type={equipped.find((e: EquippedInfo) => e.slot === 'Weapon 1')?.itemType ?? null}
+                                waiting={planWaiting}
                             />
                             {shown !== undefined && selectedBuildId.value !== null ? (
                                 <WeightReview buildId={selectedBuildId.value} slot={slot} target={shown.targetId} />

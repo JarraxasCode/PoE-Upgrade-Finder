@@ -7,8 +7,7 @@ import { compileQuery, predictComplexity, QueryCompileError } from '../src/query
 import type { CompiledQuery } from '../src/query-compiler.ts';
 import { maxLevelRequirement, saveSpec } from '../src/spec.ts';
 import type { PobTradeQuery, RunContext, SearchRequirement, SlotSearchSpec, WeightedStat } from '../src/spec.ts';
-import { v1SpecBuilder } from '../src/v1.ts';
-import { baseStats } from './fixtures.ts';
+import { baseStats, emptyPlanSpec } from './fixtures.ts';
 
 function pobQuery(weights: number): PobTradeQuery {
     const filters: { id: string; weight: number | undefined }[] = [];
@@ -58,7 +57,7 @@ test('the V8 formula matches the live checks (boots 22 + 5 = 154, helmet/amulet 
 });
 
 test('the v1 spec takes PoB weights in order, strip needs, floors and the category', () => {
-    const spec: SlotSearchSpec = v1SpecBuilder().build(context(3, baseStats({ ChaosResist: 31, ChaosResistTotal: 31 })));
+    const spec: SlotSearchSpec = emptyPlanSpec(context(3, baseStats({ ChaosResist: 31, ChaosResistTotal: 31 })));
     assert.equal(spec.category, 'armour.boots');
     assert.equal(spec.weightGroupType, 'weight');
     assert.deepEqual(
@@ -76,7 +75,7 @@ test('the v1 spec takes PoB weights in order, strip needs, floors and the catego
 });
 
 test('compiles the merged query: weighted group first, And group, our filters, no min, sorted by the weighted sum', () => {
-    const spec: SlotSearchSpec = { ...v1SpecBuilder().build(context(2)), requirements: requirements(2) };
+    const spec: SlotSearchSpec = { ...emptyPlanSpec(context(2)), requirements: requirements(2) };
     const q: CompiledQuery = compileQuery(spec, SEARCH);
     assert.deepEqual(q.body, {
         query: {
@@ -98,7 +97,7 @@ test('compiles the merged query: weighted group first, And group, our filters, n
                 },
             ],
             filters: {
-                type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'nonunique' } } },
+                type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'rare' } } },
                 req_filters: { filters: { lvl: { max: 94 } } },
                 trade_filters: { filters: { price: { min: 1, max: 33.33, option: 'chaos' } } },
             },
@@ -110,7 +109,7 @@ test('compiles the merged query: weighted group first, And group, our filters, n
 });
 
 test('over budget, the lowest-priority weights are dropped and the requirements kept', () => {
-    const spec: SlotSearchSpec = { ...v1SpecBuilder().build(context(40)), requirements: requirements(5) };
+    const spec: SlotSearchSpec = { ...emptyPlanSpec(context(40)), requirements: requirements(5) };
     const q: CompiledQuery = compileQuery(spec, SEARCH);
     assert.equal(q.weightsUsed, 33);
     assert.equal(q.complexity, 198);
@@ -120,7 +119,7 @@ test('over budget, the lowest-priority weights are dropped and the requirements 
 });
 
 test('over budget, a weight boosted in the review is kept and the smallest weights are dropped instead', () => {
-    const built: SlotSearchSpec = v1SpecBuilder().build({ ...context(40), weightEdits: { 'explicit.stat_1038': 5 } });
+    const built: SlotSearchSpec = emptyPlanSpec({ ...context(40), weightEdits: { 'explicit.stat_1038': { factor: 2 } } });
     const spec: SlotSearchSpec = { ...built, requirements: requirements(5) };
     const q: CompiledQuery = compileQuery(spec, SEARCH);
     const kept: readonly string[] = q.body.query.stats[0]?.filters.map((f: { readonly id: string }) => f.id) ?? [];
@@ -144,11 +143,32 @@ test('over budget, a weight boosted in the review is kept and the smallest weigh
 });
 
 test('no weights: no weighted group, cheapest first; too many requirements is an error', () => {
-    const spec: SlotSearchSpec = { ...v1SpecBuilder().build(context(0)), requirements: requirements(1) };
+    const spec: SlotSearchSpec = { ...emptyPlanSpec(context(0)), requirements: requirements(1) };
     const q: CompiledQuery = compileQuery(spec, SEARCH);
     assert.deepEqual(q.body.sort, { price: 'asc' });
     assert.equal(q.body.query.stats[0]?.type, 'and');
     assert.throws(() => compileQuery({ ...spec, requirements: requirements(200) }, SEARCH), QueryCompileError);
+});
+
+test('two requirements on one stat: the ranges intersect; an empty intersection names both (issue #71)', () => {
+    const spec: SlotSearchSpec = emptyPlanSpec(context(0));
+    const strip: SearchRequirement = { statId: 'pseudo.cold', min: 41, origin: 'strip', label: 'Required: cold res ≥ 41, from strip' };
+    const plan: SearchRequirement = {
+        statId: 'pseudo.cold',
+        min: 20,
+        max: 30,
+        origin: 'plan',
+        label: 'Required: cold res (20 to 30), from plan',
+    };
+    const merged: CompiledQuery = compileQuery({ ...spec, requirements: [strip, { ...plan, max: 60 }] }, SEARCH);
+    assert.deepEqual(merged.body.query.stats[0]?.filters, [{ id: 'pseudo.cold', value: { min: 41, max: 60 } }]);
+    assert.throws(
+        () => compileQuery({ ...spec, requirements: [strip, plan] }, SEARCH),
+        (error: unknown) =>
+            error instanceof QueryCompileError &&
+            /cold res ≥ 41, from strip/.test(error.message) &&
+            /\(20 to 30\), from plan/.test(error.message),
+    );
 });
 
 test('the level filter: up to the character (default), a set level, or none (issue #22)', () => {
@@ -158,11 +178,40 @@ test('the level filter: up to the character (default), a set level, or none (iss
     assert.equal(maxLevelRequirement(undefined, { kind: 'character' }), undefined);
     assert.equal(maxLevelRequirement(94, { kind: 'max', level: 100 }), 100);
     assert.equal(maxLevelRequirement(94, { kind: 'off' }), undefined);
-    assert.deepEqual(levelOf(v1SpecBuilder().build(ctx)), { filters: { lvl: { max: 94 } } });
-    assert.deepEqual(levelOf(v1SpecBuilder().build({ ...ctx, levelFilter: { kind: 'max', level: 90 } })), {
+    assert.deepEqual(levelOf(emptyPlanSpec(ctx)), { filters: { lvl: { max: 94 } } });
+    assert.deepEqual(levelOf(emptyPlanSpec({ ...ctx, levelFilter: { kind: 'max', level: 90 } })), {
         filters: { lvl: { max: 90 } },
     });
-    const off: SlotSearchSpec = v1SpecBuilder().build({ ...ctx, levelFilter: { kind: 'off' } });
+    const off: SlotSearchSpec = emptyPlanSpec({ ...ctx, levelFilter: { kind: 'off' } });
     assert.equal(levelOf(off), undefined);
     assert.equal(saveSpec(off).maxLevelRequirement, undefined);
+});
+
+function uniqueSpec(weights: readonly WeightedStat[]): SlotSearchSpec {
+    return {
+        ...emptyPlanSpec(context(0)),
+        rarity: 'unique',
+        unique: { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves' },
+        weights: weights,
+    };
+}
+
+test('a unique search sends its name, the site base name and rarity unique, sorted by its weights', () => {
+    const q: CompiledQuery = compileQuery(uniqueSpec([{ statId: 'explicit.stat_3299347043', weight: 0.33 }]), SEARCH);
+    assert.equal(q.body.query.name, "Kaom's Roots");
+    assert.equal(q.body.query.type, 'Titan Greaves');
+    assert.deepEqual(q.body.query.filters.type_filters.filters.rarity, { option: 'unique' });
+    assert.deepEqual(q.body.sort, { 'statgroup.0': 'desc' });
+    // V29 measured 64 for one weight, name, type and a price; the prediction stays at or above it.
+    assert.equal(q.complexity, 65);
+});
+
+test('a unique with nothing to weigh is searched cheapest first, with no weighted group', () => {
+    const q: CompiledQuery = compileQuery(uniqueSpec([]), SEARCH);
+    assert.deepEqual(q.body.sort, { price: 'asc' });
+    assert.equal(
+        q.body.query.stats.some((g) => g.type === 'weight'),
+        false,
+    );
+    assert.equal(q.body.query.name, "Kaom's Roots");
 });

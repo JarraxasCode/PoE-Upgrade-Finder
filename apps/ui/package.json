@@ -3,11 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "description": "The renderer UI (Preact + signals, D8), bundled by tools/build-ui with esbuild.",
-  "license": "UNLICENSED",
+  "license": "MIT",
   "type": "module",
   "dependencies": {
     "@poe-upgrade-finder/ipc": "0.1.0",
     "@poe-upgrade-finder/validate": "0.1.0",
+    "@poe-upgrade-finder/vocab": "0.1.0",
     "@preact/signals": "2.11.4",
     "preact": "11.2.0"
   },

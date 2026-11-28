@@ -3,7 +3,7 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import type { ListingType, SearchDepth } from '@poe-upgrade-finder/ipc';
+import type { ListingType, SearchDepth } from '@poe-upgrade-finder/vocab';
 
 export const depthChoice: Signal<SearchDepth | null> = signal<SearchDepth | null>(null);
 export const listingChoice: Signal<ListingType | null> = signal<ListingType | null>(null);

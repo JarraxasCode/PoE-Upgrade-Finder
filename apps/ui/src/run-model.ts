@@ -1,16 +1,9 @@
 // What the Run view shows, worked out from the run's state. Pure (no DOM), so it is unit-tested.
 
-import type {
-    HiddenReason,
-    PlanCheckStatus,
-    RunHeader,
-    RunPhase,
-    RunSnapshot,
-    UiBand,
-    UiItem,
-    UiPlanCheck,
-    UiSearch,
-} from '@poe-upgrade-finder/ipc';
+import type { PlanCheckStatus, RunHeader, RunPhase, RunSnapshot, UiBand, UiItem, UiPlanCheck, UiSearch } from '@poe-upgrade-finder/ipc';
+import { SKIP_REASONS } from '@poe-upgrade-finder/vocab';
+import { excludedModNames } from '@poe-upgrade-finder/vocab';
+import type { ExcludedModCount, JunkReason, SkipReason } from '@poe-upgrade-finder/vocab';
 
 /** While live the junk filter hasn't run yet: a "good find" passes the floors and clears the minimum gain. */
 export function isGoodFind(item: UiItem, minGainPct: number): boolean {
@@ -150,7 +143,7 @@ export function priceText(item: UiItem): string {
     return `${Number.isInteger(item.price.amount) ? item.price.amount : item.price.amount.toFixed(2)}${unit}`;
 }
 
-export const HIDDEN_LABELS: Readonly<Record<HiddenReason, string>> = {
+export const HIDDEN_LABELS: Readonly<Record<JunkReason, string>> = {
     floor: 'break a floor',
     'no-gain': 'no gain figure',
     'low-gain': 'side-grades under the minimum gain',
@@ -158,8 +151,37 @@ export const HIDDEN_LABELS: Readonly<Record<HiddenReason, string>> = {
     dominated: 'beaten by something cheaper',
 };
 
-export function hiddenCounts(items: readonly UiItem[]): Map<HiddenReason, number> {
-    const out: Map<HiddenReason, number> = new Map<HiddenReason, number>();
+const SKIP_LABELS: Readonly<Record<SkipReason, string>> = {
+    'not-for-slot': "PoB won't equip in the slot",
+    unidentified: 'unidentified',
+    'already-fetched': 'already in a cheaper band',
+    malformed: "couldn't be read",
+    'excluded-mod': 'had an excluded mod',
+};
+
+/**
+ * "12 skipped: 10 PoB won't equip in the slot, 2 unidentified." (#39), or null when nothing was skipped. Listings
+ * dropped for an excluded hybrid name the mod (#38): "3 had an excluded mod (+# to maximum Energy Shield / ...)".
+ */
+export function skippedText(
+    skippedBy: Readonly<Record<SkipReason, number>>,
+    excludedMods: readonly ExcludedModCount[] = [],
+): string | null {
+    const parts: string[] = SKIP_REASONS.filter((r: SkipReason) => skippedBy[r] > 0).map((r: SkipReason) => {
+        if (r === 'excluded-mod' && excludedMods.length > 0) {
+            return `${skippedBy[r]} ${SKIP_LABELS[r]} ${excludedModNames(excludedMods)}`;
+        }
+        return `${skippedBy[r]} ${SKIP_LABELS[r]}`;
+    });
+    if (parts.length === 0) {
+        return null;
+    }
+    const total: number = SKIP_REASONS.reduce((sum: number, r: SkipReason) => sum + skippedBy[r], 0);
+    return `${total} skipped: ${parts.join(', ')}.`;
+}
+
+export function hiddenCounts(items: readonly UiItem[]): Map<JunkReason, number> {
+    const out: Map<JunkReason, number> = new Map<JunkReason, number>();
     for (const i of items) {
         if (i.hidden !== null) {
             out.set(i.hidden, (out.get(i.hidden) ?? 0) + 1);
@@ -218,4 +240,66 @@ export function slotWasEmpty(h: RunHeader): boolean {
 /** "your Gale Talons, Leviathan Gauntlets", or "an empty slot". */
 export function currentItemText(h: RunHeader): string {
     return slotWasEmpty(h) ? 'an empty slot' : `your ${h.currentItem}`;
+}
+
+/** A result row that stands for itself and the identical copies folded under it (#113). */
+export interface FoldedItem {
+    readonly item: UiItem;
+    /** How many other listings are the same item. */
+    readonly copies: number;
+    /** The cheapest priced copy's price in chaos (it can be below the shown one's, when a tagged copy is shown). */
+    readonly fromChaos: number | null;
+}
+
+/**
+ * An item's text without its price note, blank lines and the separator the note leaves at the end: two
+ * listings with the same key are the same item.
+ */
+export function copyKey(item: UiItem): string {
+    const lines: string[] = item.text
+        .split('\n')
+        .map((line: string) => line.trim())
+        .filter((line: string) => line !== '' && !line.startsWith('Note:'));
+    while (lines.length > 0 && /^-+$/.test(lines[lines.length - 1] ?? '')) {
+        lines.pop();
+    }
+    return lines.join('\n');
+}
+
+function cheaper(a: UiItem, b: UiItem): boolean {
+    if (a.chaos === null) {
+        return false;
+    }
+    return b.chaos === null || a.chaos < b.chaos;
+}
+
+/**
+ * Identical listings (the same text apart from the price) as one row each: the cheapest priced copy is shown,
+ * or a copy in `prefer` (a tagged pick) when the group has one. Groups keep the order of their first item.
+ */
+export function foldCopies(items: readonly UiItem[], prefer: ReadonlySet<string> = new Set<string>()): FoldedItem[] {
+    const groups: Map<string, UiItem[]> = new Map<string, UiItem[]>();
+    for (const i of items) {
+        const key: string = copyKey(i);
+        const group: UiItem[] | undefined = groups.get(key);
+        if (group === undefined) {
+            groups.set(key, [i]);
+        } else {
+            group.push(i);
+        }
+    }
+    const out: FoldedItem[] = [];
+    for (const group of groups.values()) {
+        let cheapest: UiItem | undefined;
+        for (const i of group) {
+            if (cheapest === undefined || cheaper(i, cheapest)) {
+                cheapest = i;
+            }
+        }
+        const shown: UiItem | undefined = group.find((i: UiItem) => prefer.has(i.id)) ?? cheapest;
+        if (shown !== undefined) {
+            out.push({ item: shown, copies: group.length - 1, fromChaos: cheapest?.chaos ?? null });
+        }
+    }
+    return out;
 }

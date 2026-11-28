@@ -96,7 +96,7 @@ internal static class LuaHost
     {
         if (args.Length < 3)
         {
-            Console.Error.WriteLine("usage: luahost <runtimeDir> <workDir> <script.lua> [args...]");
+            WriteError("usage: luahost <runtimeDir> <workDir> <script.lua> [args...]");
             return 64;
         }
         string runtimeDir = Path.GetFullPath(args[0]);
@@ -106,7 +106,7 @@ internal static class LuaHost
         SetDllDirectory(runtimeDir);
         if (LoadLibrary(Path.Combine(runtimeDir, Lua)) == IntPtr.Zero)
         {
-            Console.Error.WriteLine("could not load " + Path.Combine(runtimeDir, Lua) + " (error " + Marshal.GetLastWin32Error() + ")");
+            WriteError("could not load " + Path.Combine(runtimeDir, Lua) + " (error " + Marshal.GetLastWin32Error() + ")");
             return 65;
         }
         Directory.SetCurrentDirectory(workDir);
@@ -137,10 +137,28 @@ internal static class LuaHost
         {
             UIntPtr length;
             IntPtr message = lua_tolstring(state, -1, out length);
-            Console.Error.WriteLine(message == IntPtr.Zero ? "lua error" : Marshal.PtrToStringAnsi(message, (int)length));
+            WriteError(message == IntPtr.Zero ? "lua error" : Utf8String(message, (int)length));
         }
         lua_close(state);
         return status == 0 ? 0 : 1;
+    }
+
+    // Lua strings are UTF-8 here (the args are pushed as UTF-8, and PoB's lua51.dll opens files with _wfopen from
+    // UTF-8), so an error naming a path like C:\Users\José\... must be decoded as UTF-8, not the ANSI code page (#70).
+    private static string Utf8String(IntPtr pointer, int length)
+    {
+        byte[] bytes = new byte[length];
+        Marshal.Copy(pointer, bytes, 0, length);
+        return Encoding.UTF8.GetString(bytes);
+    }
+
+    // stderr as UTF-8 (no BOM), whatever the console code page: the engine client reads it as UTF-8.
+    private static void WriteError(string text)
+    {
+        using (StreamWriter error = new StreamWriter(Console.OpenStandardError(), new UTF8Encoding(false)))
+        {
+            error.WriteLine(text);
+        }
     }
 
     private static void PushString(IntPtr state, string text)

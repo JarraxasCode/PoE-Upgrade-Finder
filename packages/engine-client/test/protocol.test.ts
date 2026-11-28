@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ProtocolError } from '../src/check.ts';
-import { parseMessage, readScoreItem, readStatBlock, readTradeQuery } from '../src/protocol.ts';
+import { parseMessage, readScoreItem, readStatBlock, readTradeQuery, readUniques } from '../src/protocol.ts';
 
 test('parses the four message kinds', () => {
     assert.deepEqual(parseMessage('{"event":"ready","data":{"pobVersion":"2.68.1","gcEvery":100}}'), {
@@ -45,9 +45,11 @@ test('score items: success and failure shapes', () => {
         stats: { damage: 1, values: {} },
         unparsed: {},
         validForSlot: false,
+        offHandRemoved: true,
     });
     assert.ok(ok.ok);
     assert.deepEqual(ok.unparsed, []);
+    assert.equal(ok.offHandRemoved, true);
     const bad = readScoreItem({ index: 2, ok: false, error: { code: 'parse-failed', message: 'm' } });
     assert.ok(!bad.ok);
     assert.equal(bad.error.code, 'parse-failed');
@@ -96,4 +98,55 @@ test('trade query weights may be non-finite (the engine sends them as strings)',
     assert.equal(q.weights[0]?.weight, Infinity);
     assert.ok(Number.isNaN(q.weights[0]?.meanStatDiff));
     assert.equal(q.query.stats[0]?.filters[0]?.weight, Infinity);
+});
+
+const UNIQUES = {
+    slot: 'Boots',
+    itemType: 'Boots',
+    target: { kind: 'fullDps', saved: true },
+    uniques: [
+        {
+            name: "Kaom's Roots",
+            base: 'Titan Greaves',
+            tradeType: 'Titan Greaves',
+            variant: 2,
+            variants: 2,
+            scoreLow: 1405.2,
+            scoreMid: 1413.5,
+            scoreHigh: 1421.8,
+            change: -78.2,
+            weights: [{ id: 'explicit.stat_3299347043', weight: 0.332, line: '+(150-200) to maximum Life' }],
+            rolls: [],
+            statIds: ['explicit.stat_3299347043'],
+            unmatched: [],
+        },
+        // No variants (variant missing) and nothing to weigh: Lua's empty arrays arrive as [].
+        {
+            name: 'Seven-League Step',
+            base: 'Rawhide Boots',
+            tradeType: 'Rawhide Boots',
+            variants: 1,
+            scoreLow: 1336,
+            scoreMid: 1336,
+            scoreHigh: 1336,
+            change: -164,
+            weights: [],
+            rolls: [],
+            statIds: [],
+            unmatched: [],
+        },
+    ],
+};
+
+test('uniques: reads the engine result, a missing variant as null', () => {
+    const data = readUniques(UNIQUES);
+    assert.equal(data.uniques.length, 2);
+    assert.equal(data.uniques[0]?.weights[0]?.weight, 0.332);
+    assert.equal(data.uniques[1]?.variant, null);
+    assert.deepEqual(data.uniques[1]?.weights, []);
+});
+
+test('uniques: a weight that is not a number is refused', () => {
+    const bad = { ...UNIQUES, uniques: [{ ...UNIQUES.uniques[0], weights: [{ id: 'x', weight: 'heavy', line: 'l' }] }] };
+    assert.throws(() => readUniques(bad), ProtocolError);
 });

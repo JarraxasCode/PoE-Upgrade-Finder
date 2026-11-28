@@ -8,15 +8,21 @@ import type { RateInfo, RateState, SignInState } from '@poe-upgrade-finder/ipc';
 import type { JsonlLogger, Logger } from '@poe-upgrade-finder/logging';
 import { ModCatalog } from '@poe-upgrade-finder/core';
 import { DivineRateClient, nodeFetchTransport, RateLimiter, TradeClient } from '@poe-upgrade-finder/trade';
-import type { DivineRate, LimiterEvent, RateLookup, RateStore, TradePolicy, TradeStatEntry } from '@poe-upgrade-finder/trade';
+import type {
+    DivineRate,
+    LimiterEvent,
+    RateLookup,
+    RateStore,
+    RecordedResponse,
+    TradePolicy,
+    TradeStatEntry,
+} from '@poe-upgrade-finder/trade';
 import { electronTransport } from '../electron-transport.ts';
 import { openSignInWindow, probeSignIn, TRADE_PARTITION } from '../signin.ts';
 import { postLogout } from '../signout.ts';
 import type { LogoutOutcome } from '../signout.ts';
 import type { SignInState as ProbeState } from '../signin.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
-
-export const RATE_REFRESH_BLOCK_MS: number = 30_000;
 
 export interface TradeServicesOptions {
     readonly userData: string;
@@ -29,6 +35,8 @@ export interface TradeServicesOptions {
     readonly rateStore: RateStore;
     /** The cached trade stat list (ModCatalog), read and written through the cache file. */
     readonly statCache: StatListCache;
+    /** Development (--record-trade): every trade response, for a recording. */
+    readonly onResponse?: (response: RecordedResponse) => void;
 }
 
 export interface StatListCache {
@@ -59,12 +67,13 @@ export class TradeServices {
     private checking: Promise<SignInState> | undefined = undefined;
     private windowOpen: boolean = false;
     private rate: RateState;
-    private lastRefreshAt: number | undefined = undefined;
 
     public constructor(options: TradeServicesOptions) {
         this.options = options;
         const rateLog: Logger = options.logger.area('rate');
         this.limiter = new RateLimiter<TradePolicy>({
+            // 'data' (the static lists) answers with no rate headers; the rest must never go unpaced (#79).
+            pacedWithoutRules: ['search', 'fetch'],
             onEvent: (event: LimiterEvent<TradePolicy>): void => {
                 if (event.kind === 'send') {
                     rateLog.log('debug', `send ${event.key}`, { label: event.label });
@@ -74,6 +83,8 @@ export class TradeServices {
                     rateLog.log('warn', 'stop', { key: event.key, waitMs: event.waitMs, reason: event.reason });
                 } else if (event.kind === 'retry-after') {
                     rateLog.log('warn', `429, Retry-After ${event.seconds}s`, { key: event.key });
+                } else if (event.kind === 'unusable') {
+                    rateLog.log('warn', 'rate-limit headers not usable', { key: event.key, reason: event.reason });
                 }
                 for (const listener of this.limiterListeners) {
                     listener(event);
@@ -87,6 +98,7 @@ export class TradeServices {
             transport: electronTransport(tradeSession),
             limiter: this.limiter,
             logger: options.logger.area('trade'),
+            ...(options.onResponse === undefined ? {} : { onResponse: options.onResponse }),
         });
         this.rates = new DivineRateClient({
             transport: nodeFetchTransport,
@@ -218,16 +230,16 @@ export class TradeServices {
 
     // The divine rate --------------------------------------------------------------------------------------
 
-    public getRate(): Promise<RateState> {
-        return this.withRate((league: string) => this.rates.current(league));
+    /** The rate for the league; signal: the caller's Cancel (a run's prep), which lets it go at once. */
+    public getRate(signal?: AbortSignal): Promise<RateState> {
+        return this.withRate((league: string) => this.rates.current(league, signal));
     }
 
+    /** The Refresh button. The cooldown lives in the rate client; a press during it changes nothing. */
     public refreshRate(): Promise<RateState> {
-        const now: number = Date.now();
-        if (this.lastRefreshAt !== undefined && now - this.lastRefreshAt < RATE_REFRESH_BLOCK_MS) {
+        if (this.rates.refreshBlocked()) {
             return Promise.resolve(this.rate);
         }
-        this.lastRefreshAt = now;
         return this.withRate((league: string) => this.rates.refresh(league));
     }
 
@@ -242,12 +254,12 @@ export class TradeServices {
     }
 
     /** The rate a run uses (chaos per divine), or undefined when unknown. */
-    public async chaosPerDivine(): Promise<number | undefined> {
-        return (await this.getRate()).rate?.chaosPerDivine;
+    public async chaosPerDivine(signal?: AbortSignal): Promise<number | undefined> {
+        return (await this.getRate(signal)).rate?.chaosPerDivine;
     }
 
     private blockedUntil(): number | null {
-        return this.lastRefreshAt === undefined ? null : this.lastRefreshAt + RATE_REFRESH_BLOCK_MS;
+        return this.rates.refreshBlockedUntil() ?? null;
     }
 
     private async withRate(lookup: (league: string) => Promise<RateLookup>): Promise<RateState> {

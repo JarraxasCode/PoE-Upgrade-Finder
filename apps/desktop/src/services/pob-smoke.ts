@@ -1,7 +1,9 @@
 // The smoke check a PoB update must pass before it goes live (PLAN.md, "Updating PoB in the app", step 4):
 // in its own worker on the staged copy, the user's loaded build loads, an equipped item re-listed in its own
 // slot scores exactly +0, and PoB's trade query generator runs for that slot. Numbers may move between PoB
-// versions (that's what an update is for), so the old and new baselines are reported, not compared.
+// versions (that's what an update is for), so the old and new baselines are reported, not compared. With or
+// without a build, PoB's mod data for one item type must have every mod source (issue #66): a renamed PoB table
+// must never quietly empty the slot plan editor.
 
 import { readFileSync } from 'node:fs';
 import { basename } from 'node:path';
@@ -9,13 +11,57 @@ import {
     EngineClient,
     luahostCommand,
     resolveEnginePaths,
-    type GearSlot,
     type LoadBuildData,
     type ScoreItemResult,
+    type SlotData,
     type StatBlock,
     type WithWarnings,
 } from '@poe-upgrade-finder/engine-client';
 import type { Logger } from '@poe-upgrade-finder/logging';
+import { SLOT_INFLUENCES, SLOT_SOURCES } from '@poe-upgrade-finder/vocab';
+import type { GearSlot } from '@poe-upgrade-finder/vocab';
+
+/** The item type whose slot data the smoke check reads: gloves roll from every mod source, and some bases have implicits. */
+export const SMOKE_ITEM_TYPE: string = 'Gloves';
+
+/**
+ * What an item type's slot data lacks, as short phrases: a mod source with no mods, no base with an implicit,
+ * no influence that adds a mod. Empty when nothing is missing. Meant for an item type that has them all
+ * (SMOKE_ITEM_TYPE).
+ */
+export function slotDataGaps(data: SlotData): readonly string[] {
+    const gaps: string[] = [];
+    if (data.bases.length === 0) {
+        gaps.push('no bases');
+    }
+    for (const source of SLOT_SOURCES) {
+        if (!data.families.some((f) => f.source === source)) {
+            gaps.push(`no ${source} mods`);
+        }
+    }
+    if (!data.bases.some((b) => b.implicits.length > 0)) {
+        gaps.push('no base with an implicit');
+    }
+    const influenced: boolean = data.bases.some((b) =>
+        SLOT_INFLUENCES.some((i) => {
+            const pool: number | undefined = i === 'none' ? undefined : b.pools[i];
+            return pool !== undefined && (data.pools[pool]?.length ?? 0) > 0;
+        }),
+    );
+    if (!influenced) {
+        gaps.push('no influenced mods');
+    }
+    return gaps;
+}
+
+/** Throws unless PoB's mod data for SMOKE_ITEM_TYPE has every source (slotDataGaps). */
+async function checkSlotData(client: EngineClient): Promise<void> {
+    const data: WithWarnings<SlotData> = await client.slotData(SMOKE_ITEM_TYPE);
+    const gaps: readonly string[] = slotDataGaps(data);
+    if (gaps.length > 0) {
+        throw new Error(`PoB's mod data for ${SMOKE_ITEM_TYPE} is incomplete (${gaps.join(', ')})`);
+    }
+}
 
 const SLOTS: readonly GearSlot[] = [
     'Boots',
@@ -66,7 +112,8 @@ export async function pobSmokeCheck(
     try {
         if (build === undefined) {
             await client.ping();
-            return 'PoB starts (no build was loaded to try).';
+            await checkSlotData(client);
+            return `PoB starts and its mod data has all ${SLOT_SOURCES.length} sources (no build was loaded to try).`;
         }
         const xml: string = readFileSync(build.file, 'utf8').replace(/^﻿/, '');
         const load: WithWarnings<LoadBuildData> = await client.loadBuild(xml, basename(build.file));
@@ -91,7 +138,8 @@ export async function pobSmokeCheck(
             await client.tradeQuery(slot, {});
             relisted = `your ${slot} re-listed scores +0 and the trade search builds`;
         }
-        return `Your build loads on it, ${relisted}; damage ${short(build.baseline.damage)} before, ${short(load.baseline.damage)} now.`;
+        await checkSlotData(client);
+        return `Your build loads on it, ${relisted}, its mod data has all ${SLOT_SOURCES.length} sources; damage ${short(build.baseline.damage)} before, ${short(load.baseline.damage)} now.`;
     } finally {
         await client.shutdown().catch(() => undefined);
     }

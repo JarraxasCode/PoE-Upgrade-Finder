@@ -8,7 +8,7 @@
 
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
-import { app } from 'electron';
+import { app, dialog } from 'electron';
 import type { BrowserWindow, Event, IpcMainInvokeEvent } from 'electron';
 import { luahostCommand, pinnedPobDir, POB_DIR_ENV, rebuildQueryMods, resolveEnginePaths } from '@poe-upgrade-finder/engine-client';
 import type { EngineClient, QueryModsReport } from '@poe-upgrade-finder/engine-client';
@@ -27,9 +27,15 @@ import type {
 import { JsonlLogger } from '@poe-upgrade-finder/logging';
 import type { Logger } from '@poe-upgrade-finder/logging';
 import { RecordedTrade, recordedListings, V19_RATE } from '../run/replay-trade.ts';
+import { TradeRecorder } from '../services/trade-recorder.ts';
+import type { RecordedResponse } from '@poe-upgrade-finder/trade';
 import { RunController } from '../run/run-controller.ts';
+import { planGear } from '../run/shared.ts';
 import { CacheDb, summaryKey } from '../services/cache-db.ts';
-import { SlotDataService } from '../services/slot-data.ts';
+import { planSlotData, SlotDataService } from '../services/slot-data.ts';
+import { UniqueService } from '../services/uniques.ts';
+import { WeightService } from '../services/weights.ts';
+import type { SlotPlan } from '@poe-upgrade-finder/vocab';
 import { BuildWatcher } from '../services/build-watcher.ts';
 import { EngineSession } from '../services/engine-session.ts';
 import { SettingsStore } from '../services/settings-store.ts';
@@ -41,7 +47,8 @@ import { buildFileFor, createHandlers, currentBuilds } from './handlers.ts';
 import type { AppServices } from './handlers.ts';
 import { sendEvent, serveIpc } from './ipc-server.ts';
 import { createMainWindow, isMainWindowSender } from './main-window.ts';
-import { describeError } from '@poe-upgrade-finder/validate';
+import { installProcessErrorHandlers } from '../process-errors.ts';
+import { describeError, messageOf } from '@poe-upgrade-finder/validate';
 
 export interface UiArgs {
     readonly smoke: string | undefined;
@@ -51,6 +58,8 @@ export interface UiArgs {
     readonly smokeLive: boolean;
     /** Development: a recorded trade file to replay instead of the trade site (no sign-in, no trade calls). */
     readonly replay: string | undefined;
+    /** Development: save every trade search and fetch response of live runs to this file (a fixture's raw input). */
+    readonly recordTrade: string | undefined;
     /** With --smoke and --replay: "buildId|slot|budget|depth" starts a run; captures <file>-live.png mid-run, then <file> when done. */
     readonly smokeRun: string | undefined;
     /** With --smoke: a script run in the page just before the final capture (to open a group or a detail). */
@@ -71,6 +80,7 @@ export function parseUiArgs(argv: readonly string[]): UiArgs {
         pob: valueOf('--pob'),
         smokeLive: argv.includes('--smoke-live'),
         replay: valueOf('--replay'),
+        recordTrade: valueOf('--record-trade'),
         smokeRun: valueOf('--smoke-run'),
         smokeJs: valueOf('--smoke-js'),
         smokeRemove: argv.includes('--smoke-remove'),
@@ -195,6 +205,23 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
     const logger: JsonlLogger = new JsonlLogger({ dir: join(userData, 'logs'), debug: args.debug || store.settings.debug });
     const uiLog: Logger = logger.area('ui');
     uiLog.log('info', 'app starting', { appVersion: appVersion, electron: process.versions.electron, smoke: args.smoke !== undefined });
+    installProcessErrorHandlers(process, {
+        log: logger.area('main'),
+        onFatal: (error: Error) => {
+            if (args.smoke === undefined) {
+                dialog.showErrorBox(
+                    'PoE Upgrade Finder hit an error and will close',
+                    `${messageOf(error)}
+
+The details are in the app's log: after restarting, use Export logs on the Settings view to save them.`,
+                );
+            } else {
+                process.stderr.write(`smoke: uncaught exception in the main process: ${messageOf(error)}
+`);
+            }
+            app.exit(1);
+        },
+    });
 
     let win: BrowserWindow | undefined;
     const emit = (event: MainEvent): void => {
@@ -242,7 +269,13 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         pobVersion: () => pobVersionOf(pob.liveDir()),
     });
     const cache: CacheDb = new CacheDb(join(userData, 'cache.sqlite'));
+    const recorder: TradeRecorder | undefined =
+        args.recordTrade === undefined ? undefined : new TradeRecorder(args.recordTrade, logger.area('trade'));
+    if (args.recordTrade !== undefined) {
+        logger.area('trade').log('warn', 'record-trade: saving every trade search and fetch response', { file: args.recordTrade });
+    }
     const trade: TradeServices = new TradeServices({
+        ...(recorder === undefined ? {} : { onResponse: (r: RecordedResponse): void => recorder.record(r) }),
         userData: userData,
         rateStore: cache.rateStore(),
         statCache: cache,
@@ -261,6 +294,33 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         pobVersion: () => pobVersionOf(pob.liveDir()),
         fetch: (itemType: string) => session.exclusive((client: EngineClient) => client.slotData(itemType)),
         logger: logger.area('engine'),
+    });
+    const weights: WeightService = new WeightService({
+        cache: cache,
+        session: session,
+        buildFile: (buildId: string) => buildFileFor(services, buildId),
+        blend: (buildId: string) => store.buildSettings(buildId).blend,
+        // Never fetched in replay mode (the cached list only).
+        catalog: () => trade.catalog(args.replay !== undefined),
+        slotData: (plan: SlotPlan) => planSlotData(slotData, plan),
+        // The loaded build's weapons, else the ones PoB reported last time (the gear cache).
+        gear: (buildId: string) => {
+            const loaded = session.loaded;
+            if (loaded !== undefined && loaded.buildId === buildId) {
+                return planGear(loaded.load.equipped);
+            }
+            const cached = cache.equipped(buildId);
+            return cached === undefined ? undefined : planGear(cached.map((e) => ({ slot: e.slot, type: e.itemType ?? undefined })));
+        },
+        logger: logger.area('run'),
+    });
+    const uniques: UniqueService = new UniqueService({
+        cache: cache,
+        session: session,
+        buildFile: (buildId: string) => buildFileFor(services, buildId),
+        blend: (buildId: string) => store.buildSettings(buildId).blend,
+        catalog: () => trade.catalog(args.replay !== undefined),
+        logger: logger.area('run'),
     });
     const services: AppServices = {
         appVersion: appVersion,
@@ -294,6 +354,8 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         session: session,
         trade: trade,
         slotData: slotData,
+        weights: weights,
+        uniques: uniques,
         runs: () => runs,
         window: () => win,
         onBuildsDirChanged: (list: BuildsList) => {
@@ -314,7 +376,8 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
         trade: trade,
         buildFile: (buildId: string) => buildFileFor(services, buildId),
         emit: emit,
-        cache: cache,
+        weights: weights,
+        uniques: uniques,
         slotData: slotData,
         ...(args.replay === undefined
             ? {}
@@ -332,6 +395,12 @@ export async function runUiApp(argv: readonly string[], userData: string, appVer
     serveIpc(createHandlers(services), (event: IpcMainInvokeEvent) => isMainWindowSender(win, event), logger.area('ipc'), onProblem);
 
     win = createMainWindow({ logger: uiLog, hidden: args.smoke !== undefined, onProblem: onProblem });
+    // Settings repairs (issue #69) show once the page can receive them; the app settings were read before it existed.
+    win.webContents.once('did-finish-load', () => {
+        store.setNotifier((message: string) => {
+            emit({ kind: 'notice', level: 'warn', message: message });
+        });
+    });
     let quitting: boolean = false;
     app.on('before-quit', (event: Event) => {
         if (quitting) {

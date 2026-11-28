@@ -1,7 +1,8 @@
 // ModCatalog (PLAN.md, Search spec, "What v1 must build"): names trade stats for people. v1 is backed by the
 // trade site's stat list; v0.2 adds per-slot mod lists from PoB's data (the engine's slotData, Phase 6).
 
-import type { SlotData, SlotFamily, SlotInfluence, SlotMod } from '@poe-upgrade-finder/engine-client';
+import type { SlotData, SlotFamily, SlotMod } from '@poe-upgrade-finder/engine-client';
+import type { SlotInfluence } from '@poe-upgrade-finder/vocab';
 import type { TradeStatEntry } from '@poe-upgrade-finder/trade';
 import type { SlotId } from './spec.ts';
 

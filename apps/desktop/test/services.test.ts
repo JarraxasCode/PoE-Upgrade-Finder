@@ -1,14 +1,13 @@
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, utimesSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, test } from 'node:test';
 import { DEFAULT_FLOORS } from '@poe-upgrade-finder/core';
-import { GEAR_SLOTS as ENGINE_SLOTS } from '@poe-upgrade-finder/engine-client';
 import type { LoadBuildData, SocketGroupInfo } from '@poe-upgrade-finder/engine-client';
-import { GEAR_SLOTS, readBuildSettings, readFloors, readLevelFilter } from '@poe-upgrade-finder/ipc';
+import { readBuildSettings, readFloors, readLevelFilter, readStoredBuildSettings } from '@poe-upgrade-finder/ipc';
 import type { Logger } from '@poe-upgrade-finder/logging';
-import { buildSummary, targetOptions } from '../src/services/build-summary.ts';
+import { buildSummary, targetOptions, targetRequest } from '../src/services/build-summary.ts';
 import { buildEntryFromHead, buildFilePath, listBuilds, resolveBuildsDir, xmlAttribute } from '../src/services/pob-builds.ts';
 import { buildSettingsFileName, defaultBuildSettings, SettingsStore } from '../src/services/settings-store.ts';
 
@@ -30,8 +29,7 @@ function save(path: string, head: string, mtimeSec: number): void {
     utimesSync(path, mtimeSec, mtimeSec);
 }
 
-test('the ipc mirrors match core and the engine', () => {
-    assert.deepEqual(GEAR_SLOTS, ENGINE_SLOTS);
+test('the defaults pass their own checks unchanged: the default floors (also read over by --floors) and build settings', () => {
     assert.deepEqual(readFloors(DEFAULT_FLOORS, 'f'), DEFAULT_FLOORS);
     assert.deepEqual(readBuildSettings(defaultBuildSettings(), 's'), defaultBuildSettings());
 });
@@ -126,10 +124,87 @@ test('settings: defaults, save and read back, broken files fall back', () => {
     assert.equal(store.buildSettings(id).lastSlot, 'Boots');
     assert.equal(store.buildSettings(id).blend, 0.7);
 
-    writeFileSync(join(dir, 'characters', buildSettingsFileName(id)), '{"blend": 9}');
+    writeFileSync(join(dir, 'characters', buildSettingsFileName(id)), 'not json');
     lines.length = 0;
     assert.deepEqual(store.buildSettings(id), defaultBuildSettings());
     assert.ok(lines.some((l) => l.includes('invalid')));
+});
+
+test('a build settings file with bad parts keeps the rest, keeps the original and says so once (issue #69)', () => {
+    const dir: string = join(root, 'appdata-69');
+    const store: SettingsStore = new SettingsStore(dir, log);
+    const notices: string[] = [];
+    store.setNotifier((message: string) => {
+        notices.push(message);
+    });
+    const id: string = 'League/RF.xml';
+    const file: string = join(dir, 'characters', buildSettingsFileName(id));
+    const goodPlan = { slot: 'Boots', itemType: null, base: null, picks: [] };
+    const floors = { ...DEFAULT_FLOORS, chaosResMin: 20 };
+    const original: string = JSON.stringify({
+        ...defaultBuildSettings(),
+        floors: floors,
+        blend: 9, // out of range: back to the default alone
+        lastSlot: 'Boots',
+        slotPlans: { Boots: goodPlan, Gloves: { slot: 'Gloves', itemType: 5, base: null, picks: [] } },
+        // Before #111: 0 was off (kept as off), other numbers absolute weights (dropped); a bad new edit drops its slot.
+        weightEdits: {
+            Boots: { 'explicit.stat_1': 0, 'explicit.stat_3': { factor: 2 }, 'explicit.stat_4': 2.5 },
+            Gloves: { 'explicit.stat_2': { factor: -1 } },
+        },
+        fromANewerVersion: true,
+    });
+    mkdirSync(join(dir, 'characters'), { recursive: true });
+    writeFileSync(file, original);
+
+    const read = store.buildSettings(id);
+    assert.deepEqual(read.floors, floors);
+    assert.equal(read.lastSlot, 'Boots');
+    assert.equal(read.blend, defaultBuildSettings().blend);
+    assert.deepEqual(read.slotPlans, { Boots: goodPlan });
+    assert.deepEqual(read.weightEdits, { Boots: { 'explicit.stat_1': { off: true }, 'explicit.stat_3': { factor: 2 } } });
+
+    const copies: string[] = readdirSync(join(dir, 'characters')).filter((n: string) => n.includes('.bad-'));
+    assert.equal(copies.length, 1);
+    assert.equal(readFileSync(join(dir, 'characters', copies[0] ?? ''), 'utf8'), original);
+    assert.equal(notices.length, 1);
+    assert.match(notices[0] ?? '', /RF\.xml.*5 settings.*\.bad-/);
+
+    // The file now holds the repaired settings: reading again repairs nothing and says nothing.
+    assert.deepEqual(store.buildSettings(id), read);
+    assert.equal(notices.length, 1);
+    assert.equal(readdirSync(join(dir, 'characters')).filter((n: string) => n.includes('.bad-')).length, 1);
+});
+
+test('repair notices from before the window wait for the notifier (issue #69)', () => {
+    const dir: string = join(root, 'appdata-69-app');
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'settings.json'), '{"league": ""}');
+    const store: SettingsStore = new SettingsStore(dir, log);
+    assert.equal(store.settings.league, 'Covens');
+    const notices: string[] = [];
+    store.setNotifier((message: string) => {
+        notices.push(message);
+    });
+    assert.equal(notices.length, 1);
+    assert.match(notices[0] ?? '', /app settings.*\.bad-/);
+    assert.ok(readdirSync(dir).some((n: string) => n.startsWith('settings.bad-')));
+});
+
+test('stored build settings: a value that is not a record is refused whole; each bad field is reported', () => {
+    assert.throws(() => readStoredBuildSettings([], 's', defaultBuildSettings(), () => undefined));
+    const dropped: string[] = [];
+    const read = readStoredBuildSettings(
+        { ...defaultBuildSettings(), minGainPct: 'x', slotPlans: 3 },
+        's',
+        defaultBuildSettings(),
+        (p: string) => {
+            dropped.push(p);
+        },
+    );
+    assert.deepEqual(read, defaultBuildSettings());
+    assert.equal(dropped.length, 2);
+    assert.ok(dropped.some((p: string) => p.startsWith('s.minGainPct')));
 });
 
 test('settings file names: readable, distinct per folder', () => {
@@ -157,6 +232,14 @@ function group(
         ...extra,
     };
 }
+
+test('target ids as engine requests (moved from the retired CLI)', () => {
+    assert.deepEqual(targetRequest('saved'), { kind: 'saved' });
+    assert.deepEqual(targetRequest('full'), { kind: 'fullDps' });
+    assert.deepEqual(targetRequest('skill:8.1.2'), { kind: 'skill', group: 8, activeSkill: 1, part: 2 });
+    assert.deepEqual(targetRequest('skill:5.1'), { kind: 'skill', group: 5, activeSkill: 1 });
+    assert.throws(() => targetRequest('skill:5'), /bad damage target/);
+});
 
 test('damage targets: saved, Full DPS with the ticked groups, each skill and part', () => {
     const skills: SocketGroupInfo[] = [
@@ -210,4 +293,47 @@ test('the summary warns when the damage target reads 0', () => {
     assert.equal(s.targetLabel, 'Full DPS');
     assert.equal(s.warnings[0], 'from PoB');
     assert.match(s.warnings[1] ?? '', /reads 0/);
+    // PoB's own reason for a 0 (#36) replaces the generic hint.
+    const disabled = buildSummary({
+        buildId: 'x.xml',
+        load: load,
+        targetId: 'saved',
+        target: load.target,
+        stats: load.baseline,
+        warnings: [{ code: 'target-disabled', message: 'The damage target reads 0: PoB has disabled X (No usable weapon equipped).' }],
+        fileModifiedMs: 1,
+        art: () => undefined,
+    });
+    assert.deepEqual(disabled.warnings, ['The damage target reads 0: PoB has disabled X (No usable weapon equipped).']);
+});
+
+test('stored build settings: a v0.2 file has no unique choices, and reads with none and no drop (#113)', () => {
+    const { uniqueChoices: _none, ...v02 } = defaultBuildSettings();
+    const dropped: string[] = [];
+    const read = readStoredBuildSettings(v02, 's', defaultBuildSettings(), (p: string) => {
+        dropped.push(p);
+    });
+    assert.deepEqual(read.uniqueChoices, {});
+    assert.deepEqual(dropped, []);
+});
+
+test('stored build settings: a unique choice round-trips, apostrophe and all, beside the rare plan', () => {
+    const plan = { slot: 'Boots', itemType: 'Boots', base: 'Sorcerer Boots', picks: [] } as const;
+    const settings = {
+        ...defaultBuildSettings(),
+        slotPlans: { Boots: plan },
+        uniqueChoices: { Boots: { mode: 'unique', unique: { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves' } } },
+    };
+    const back = readBuildSettings(JSON.parse(JSON.stringify(settings)), 's');
+    assert.deepEqual(back.uniqueChoices, settings.uniqueChoices);
+    assert.deepEqual(back.slotPlans, settings.slotPlans);
+    assert.throws(() => readBuildSettings({ ...settings, uniqueChoices: { Boots: { mode: 'legendary', unique: null } } }, 's'));
+});
+
+test('settings: Normal search depth on first start; a saved Thorough stays (#59)', () => {
+    const dir: string = join(root, 'appdata-depth');
+    const store: SettingsStore = new SettingsStore(dir, log);
+    assert.equal(store.settings.depth, 'normal');
+    store.saveSettings({ ...store.settings, depth: 'thorough' });
+    assert.equal(new SettingsStore(dir, log).settings.depth, 'thorough');
 });

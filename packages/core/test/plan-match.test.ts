@@ -1,9 +1,9 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import type { StatLine } from '@poe-upgrade-finder/trade';
-import { comparedDefence, lineNumber, lineValue, matchPlan } from '../src/plan-match.ts';
+import { comparedDefence, lineNumber, lineValue, matchPlan, socketCounts } from '../src/plan-match.ts';
 import type { PlanMatch, RequirementMatch } from '../src/plan-match.ts';
-import type { SearchRequirement } from '../src/spec.ts';
+import type { SearchRequirement, SearchSockets } from '../src/spec.ts';
 
 const DEX: string = 'stat_3261801346';
 const ALL_ATTR: string = 'stat_1379411836';
@@ -157,4 +157,65 @@ test('defences are compared at 20% quality: a 0% item listed at 418 Armour passe
     assert.equal(es.status, 'met');
     const low: PlanMatch = matchPlan(spec, { statLines: [], properties: ['Quality: +10%', 'Armour: 418'] });
     assert.equal(low.defences[0]?.status, 'missed', '418 × 1.2 / 1.1 = 456');
+});
+
+test('socketCounts: all sockets, the largest linked group, colours per row; abyssal sockets count (V30)', () => {
+    const four = socketCounts('R-G-B B');
+    assert.equal(four.sockets, 4);
+    assert.equal(four.links, 3);
+    assert.deepEqual(four.colours.sockets, { r: 1, g: 1, b: 2, w: 0 });
+    assert.deepEqual(four.colours.links, { r: 1, g: 1, b: 1, w: 0 });
+    const abyss = socketCounts('R-G-A B');
+    assert.equal(abyss.sockets, 4);
+    assert.equal(abyss.links, 3);
+    assert.deepEqual(abyss.colours.sockets, { r: 1, g: 1, b: 1, w: 0 });
+    const none = socketCounts('');
+    assert.equal(none.sockets, 0);
+    assert.equal(none.links, 0);
+});
+
+test('socketCounts: two largest groups of one size give each colour its best group', () => {
+    const c = socketCounts('R-R-G B-B-B');
+    assert.equal(c.links, 3);
+    assert.deepEqual(c.colours.links, { r: 2, g: 1, b: 3, w: 0 });
+});
+
+test('socket filters: met or missed by the item as the site reads it; unknown without socket data', () => {
+    const links6: SearchSockets = { row: 'links', range: { min: 6 }, origin: 'plan', label: 'Links ≥ 6, from plan' };
+    const red3: SearchSockets = { row: 'sockets', range: { r: 3 }, origin: 'plan', label: 'Sockets 3 R, from plan' };
+    const spec = { requirements: [], exclusions: [], defences: [], sockets: [links6, red3] };
+    const six: PlanMatch = matchPlan(spec, { statLines: [], properties: [], sockets: 'R-R-R-G-G-B' });
+    assert.deepEqual(
+        six.sockets.map((s) => [s.row, s.status, s.value]),
+        [
+            ['links', 'met', '6 sockets, 6 linked'],
+            ['sockets', 'met', '6 sockets, 6 linked'],
+        ],
+    );
+    const split: PlanMatch = matchPlan(spec, { statLines: [], properties: [], sockets: 'R-G R-R-G B' });
+    assert.deepEqual(
+        split.sockets.map((s) => s.status),
+        ['missed', 'met'],
+    );
+    const unknown: PlanMatch = matchPlan(spec, { statLines: [], properties: [] });
+    assert.deepEqual(
+        unknown.sockets.map((s) => [s.status, s.value]),
+        [
+            ['unknown', null],
+            ['unknown', null],
+        ],
+    );
+});
+
+test('socket filters: an item with no sockets listed is unknown unless no sockets meets the filter', () => {
+    const links: SearchSockets = { row: 'links', range: { min: 5 }, origin: 'plan', label: 'Links ≥ 5, from plan' };
+    const none: SearchSockets = { row: 'sockets', range: { max: 0 }, origin: 'plan', label: 'Sockets ≤ 0, from plan' };
+    const m: PlanMatch = matchPlan(
+        { requirements: [], exclusions: [], defences: [], sockets: [links, none] },
+        { statLines: [], properties: [], sockets: '' },
+    );
+    assert.deepEqual(
+        m.sockets.map((s) => s.status),
+        ['unknown', 'met'],
+    );
 });

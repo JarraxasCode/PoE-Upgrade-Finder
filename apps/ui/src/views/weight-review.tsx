@@ -3,8 +3,8 @@
 // Only the search ranking changes; PoB still scores every listing against the real build, so gains stay honest.
 
 import { useEffect, useRef, useState } from 'preact/hooks';
-import type { JSX, TargetedEvent } from 'preact';
-import type { GearSlot, PrunedStat, SearchedStat, WeightPreview } from '@poe-upgrade-finder/ipc';
+import type { JSX, TargetedEvent, TargetedKeyboardEvent } from 'preact';
+import type { PrunedStat, SearchedStat, WeightPreview } from '@poe-upgrade-finder/ipc';
 import {
     editsFor,
     loadWeightPreview,
@@ -15,6 +15,8 @@ import {
     weightPreview,
 } from '../state/weights.ts';
 import { Info } from './item-card.tsx';
+import { isOn, percentOfTop, shownPercent, topWeight, weightCounts, withOn, withPercent } from '@poe-upgrade-finder/vocab';
+import type { GearSlot, WeightCounts, WeightEdit, WeightEdits } from '@poe-upgrade-finder/vocab';
 
 const SHOWN: number = 12;
 
@@ -28,26 +30,31 @@ function WeightRow(props: {
     readonly slot: GearSlot;
     readonly stat: SearchedStat;
     readonly top: number;
-    readonly edit: number | undefined;
+    readonly edit: WeightEdit | undefined;
     /** Taken out by the slot plan: not searched, whatever its edit says. */
     readonly pruned: PrunedStat | undefined;
 }): JSX.Element {
     const { stat, top, edit, pruned } = props;
-    const on: boolean = pruned === undefined && (edit === undefined || edit > 0);
-    const weight: number = edit === undefined || edit === 0 ? stat.weight : edit;
-    const pct: number = Math.round((weight / top) * 100);
+    const on: boolean = pruned === undefined && isOn(edit);
+    const pct: number = shownPercent(stat.weight, edit, top);
     const [text, setText] = useState<string>(String(pct));
+    const [refused, setRefused] = useState<boolean>(false);
     useEffect(() => {
         setText(String(pct));
     }, [pct]);
-    const commit = (): void => {
-        const n: number = Number(text);
-        if (!Number.isFinite(n) || n <= 0) {
+    /** Reads the box itself, not the last render's text: an input and a change in one tick would see the old text. */
+    const commit = (typed: string): void => {
+        const next: WeightEdit | undefined | 'refused' = withPercent(edit, Number(typed), stat.weight, top);
+        if (next === 'refused') {
+            // Said on screen, not dropped silently (#111): the box takes a % above 0; off is the tick box.
             setText(String(pct));
+            setRefused(true);
             return;
         }
-        const next: number = (Math.min(n, 1000) / 100) * top;
-        setWeightEdit(props.slot, stat.statId, Math.abs(next - stat.weight) < 1e-9 ? undefined : next);
+        setRefused(false);
+        if (next !== edit) {
+            setWeightEdit(props.slot, stat.statId, next);
+        }
     };
     const changed: boolean = edit !== undefined;
     return (
@@ -58,11 +65,7 @@ function WeightRow(props: {
                     checked={on}
                     disabled={pruned !== undefined}
                     onChange={(e: TargetedEvent<HTMLInputElement>) => {
-                        setWeightEdit(
-                            props.slot,
-                            stat.statId,
-                            e.currentTarget.checked ? (edit !== undefined && edit > 0 ? edit : undefined) : 0,
-                        );
+                        setWeightEdit(props.slot, stat.statId, withOn(edit, e.currentTarget.checked));
                     }}
                 />
                 <span class="weight-label" title={stat.statId}>
@@ -81,15 +84,20 @@ function WeightRow(props: {
                         class="num"
                         inputMode="numeric"
                         aria-label={`Weight for ${stat.label}, % of the top stat`}
+                        aria-invalid={refused}
+                        title={refused ? 'Type a % above 0. To leave the stat out, untick it.' : undefined}
                         disabled={!on}
                         value={text}
                         onInput={(e: TargetedEvent<HTMLInputElement>) => {
                             setText(e.currentTarget.value);
+                            setRefused(false);
                         }}
-                        onChange={commit}
-                        onKeyDown={(e: KeyboardEvent) => {
+                        onChange={(e: TargetedEvent<HTMLInputElement>) => {
+                            commit(e.currentTarget.value);
+                        }}
+                        onKeyDown={(e: TargetedKeyboardEvent<HTMLInputElement>) => {
                             if (e.key === 'Enter') {
-                                commit();
+                                commit(e.currentTarget.value);
                             }
                         }}
                     />
@@ -100,7 +108,7 @@ function WeightRow(props: {
                 <button
                     type="button"
                     class="link small"
-                    title={`Back to PoB's ${Math.round((stat.weight / top) * 100)}%`}
+                    title={`Back to PoB's ${percentOfTop(stat.weight, top)}%, on`}
                     onClick={() => {
                         setWeightEdit(props.slot, stat.statId, undefined);
                     }}
@@ -149,7 +157,7 @@ export function WeightReview(props: Props): JSX.Element {
         void loadWeightPreview(props.buildId, props.slot, props.target);
     }, [key]);
     const st = weightPreview.value;
-    const edits: Readonly<Record<string, number>> = editsFor(props.slot);
+    const edits: WeightEdits = editsFor(props.slot);
     // A plan edit reloads the review: the last one for this build, slot and target stays up (dimmed) meanwhile.
     const baseKey: string = previewBaseKey(props.buildId, props.slot, props.target);
     const last = useRef<{ readonly baseKey: string; readonly preview: WeightPreview } | null>(null);
@@ -163,10 +171,8 @@ export function WeightReview(props: Props): JSX.Element {
     const weights: readonly SearchedStat[] = [...(ready?.weights ?? [])].sort(
         (a: SearchedStat, b: SearchedStat) => Number(pruned.has(a.statId)) - Number(pruned.has(b.statId)),
     );
-    const top: number = ready?.weights[0]?.weight ?? 1;
-    const searchable: readonly SearchedStat[] = weights.filter((w: SearchedStat) => !pruned.has(w.statId));
-    const offCount: number = searchable.filter((w: SearchedStat) => edits[w.statId] === 0).length;
-    const changedCount: number = weights.filter((w: SearchedStat) => edits[w.statId] !== undefined && edits[w.statId] !== 0).length;
+    const top: number = topWeight(ready?.weights ?? []);
+    const counts: WeightCounts = weightCounts(weights, edits, new Set<string>(pruned.keys()));
     const shown: readonly SearchedStat[] = all ? weights : weights.slice(0, SHOWN);
     return (
         <div class={`card weight-card${ready !== undefined && !fresh ? ' stale' : ''}`} aria-busy={!fresh}>
@@ -186,10 +192,10 @@ export function WeightReview(props: Props): JSX.Element {
                 </h2>
                 {ready !== undefined && (
                     <span class="muted small">
-                        {searchable.length - offCount} of {searchable.length} stats on
-                        {changedCount > 0 ? ` · ${changedCount} reweighted` : ''}
+                        {counts.on} of {counts.searchable} stats on
+                        {counts.reweighted > 0 ? ` · ${counts.reweighted} reweighted` : ''}
                         {pruned.size > 0 ? ` · ${pruned.size} taken out by the plan` : ''}
-                        {(offCount > 0 || changedCount > 0) && (
+                        {Object.keys(edits).length > 0 && (
                             <>
                                 {' '}
                                 ·{' '}

@@ -1,7 +1,19 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
 import { ValidationError } from '@poe-upgrade-finder/validate';
-import { METHOD_RESULTS, parseInvokeRequest, parseInvokeResponse, parseMainEvent, readRunRequest, readSlotPlan } from '../src/index.ts';
+import { isUniquePlan } from '@poe-upgrade-finder/vocab';
+import {
+    METHOD_RESULTS,
+    PLAN_CHECK_KINDS,
+    parseInvokeRequest,
+    parseInvokeResponse,
+    parseMainEvent,
+    readFloors,
+    readRunHeader,
+    readRunRequest,
+    readRunSummary,
+    readSlotPlan,
+} from '../src/index.ts';
 
 const PLAN = {
     slot: 'Boots',
@@ -85,9 +97,12 @@ test('requests: settings are checked field by field', () => {
         lastBudget: '1d',
         lastMinBudget: null,
         lastTarget: 'full',
-        weightEdits: { Boots: { 'explicit.stat_1': 0 } },
+        weightEdits: {
+            Boots: { 'explicit.stat_1': { off: true }, 'explicit.stat_2': { factor: 1.5 }, 'explicit.stat_3': { factor: 2, off: true } },
+        },
         slotPlans: { Boots: PLAN },
         levelFilter: { kind: 'max', level: 90 },
+        uniqueChoices: {},
     };
     assert.deepEqual(parseInvokeRequest({ method: 'build.settings.save', params: { buildId: 'a.xml', settings: build } }).params, {
         buildId: 'a.xml',
@@ -100,6 +115,12 @@ test('requests: settings are checked field by field', () => {
         { floors: { chaosResMin: Number.NaN } },
         // A plan saved under another slot.
         { slotPlans: { Gloves: PLAN } },
+        // Weight edits (#111): the old absolute numbers only migrate from a file, never over IPC.
+        { weightEdits: { Boots: { 'explicit.stat_1': 0 } } },
+        { weightEdits: { Boots: { 'explicit.stat_1': { factor: 0 } } } },
+        { weightEdits: { Boots: { 'explicit.stat_1': { factor: -1 } } } },
+        { weightEdits: { Boots: { 'explicit.stat_1': { off: false } } } },
+        { weightEdits: { Boots: { 'explicit.stat_1': {} } } },
     ]) {
         assert.throws(
             () => parseInvokeRequest({ method: 'build.settings.save', params: { buildId: 'a.xml', settings: { ...build, ...bad } } }),
@@ -107,6 +128,21 @@ test('requests: settings are checked field by field', () => {
             JSON.stringify(bad),
         );
     }
+});
+
+test('floors: each field checked, only what is given comes back; unknown fields and nulls refused', () => {
+    // The headless mode's --floors file goes through this reader too, spread over the default floors.
+    assert.deepEqual(readFloors({ chaosResMin: 40, maxResMin: { Fire: 85, Cold: 76 }, targets: { overcapMin: 5 } }, 'floors'), {
+        chaosResMin: 40,
+        maxResMin: { Fire: 85, Cold: 76 },
+        targets: { overcapMin: 5 },
+    });
+    assert.throws(() => readFloors({ chaosRes: 40 }, 'floors'), /floors\.chaosRes: unexpected field/);
+    assert.throws(() => readFloors({ chaosResMin: '40' }, 'floors'), /floors\.chaosResMin/);
+    assert.throws(() => readFloors({ spellBlockMin: null }, 'floors'), /floors\.spellBlockMin/);
+    assert.throws(() => readFloors({ spellBlockMin: 101 }, 'floors'), /floors\.spellBlockMin: expected 0 to 100/);
+    assert.throws(() => readFloors({ maxResMin: { Chaos: 80 } }, 'floors'), /floors\.maxResMin\.Chaos: unexpected field/);
+    assert.throws(() => readFloors([], 'floors'), ValidationError);
 });
 
 test('rate and sign-in: manual rates are bounded; states are checked', () => {
@@ -201,4 +237,159 @@ test('weights.preview takes a plan for its own slot; slot.data names an item typ
     const data = { slot: 'Boots', itemType: 'Boots', base: null };
     assert.deepEqual(parseInvokeRequest({ method: 'slot.data', params: data }).params, data);
     assert.throws(() => parseInvokeRequest({ method: 'slot.data', params: { ...data, itemType: '' } }), ValidationError);
+});
+
+test('run summary: listings dropped for an excluded hybrid are counted per mod, each count checked (#38)', () => {
+    const counts = {
+        searches: 2,
+        fetched: 100,
+        scored: 92,
+        failed: 0,
+        skipped: 8,
+        skippedBy: { 'not-for-slot': 0, unidentified: 0, 'already-fetched': 0, malformed: 0, 'excluded-mod': 8 },
+        excludedMods: [{ name: '+# to maximum Energy Shield / +# to maximum Mana', dropped: 8 }],
+        missing: 0,
+    };
+    const summary = {
+        verdict: 'no-upgrade',
+        note: 'none',
+        pickId: null,
+        bestId: null,
+        overBudgetIds: [],
+        counts: counts,
+        stoppedReason: null,
+        finishedAtMs: 2,
+        seconds: 1,
+        items: [],
+        runFile: null,
+    };
+    assert.deepEqual(readRunSummary(summary, 'summary').counts, counts);
+    assert.throws(
+        () => readRunSummary({ ...summary, counts: { ...counts, excludedMods: [{ name: 'x', dropped: 'eight' }] } }, 'summary'),
+        /summary\.counts\.excludedMods\[0\]\.dropped/,
+    );
+    const { excludedMods: _dropped, ...without } = counts;
+    assert.throws(() => readRunSummary({ ...summary, counts: without }, 'summary'), /summary\.counts\.excludedMods/);
+    assert.throws(
+        () =>
+            readRunSummary({ ...summary, counts: { ...counts, skippedBy: { ...counts.skippedBy, 'excluded-mod': undefined } } }, 'summary'),
+        /summary\.counts\.skippedBy\.excluded-mod/,
+    );
+});
+
+const KAOM = { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves' };
+const UNIQUE_PLAN = { slot: 'Boots', itemType: 'Boots', base: null, picks: [], unique: KAOM };
+
+test('slot plans: a picked unique is read as sent', () => {
+    assert.deepEqual(readSlotPlan(UNIQUE_PLAN, 'p'), UNIQUE_PLAN);
+    assert.equal(isUniquePlan(readSlotPlan(UNIQUE_PLAN, 'p')), true);
+    assert.equal(isUniquePlan(readSlotPlan(EMPTY_HELMET, 'p')), false);
+});
+
+test('slot plans: a unique needs its names, its item type and no plan of its own', () => {
+    for (const key of ['name', 'base', 'tradeType'] as const) {
+        assert.throws(() => readSlotPlan({ ...UNIQUE_PLAN, unique: { ...KAOM, [key]: '' } }, 'p'), new RegExp(`unique\.${key}`));
+    }
+    assert.throws(() => readSlotPlan({ ...UNIQUE_PLAN, unique: { ...KAOM, extra: 1 } }, 'p'), ValidationError);
+    assert.throws(() => readSlotPlan({ ...UNIQUE_PLAN, itemType: null }, 'p'), /item type/);
+    for (const bad of [
+        { ...UNIQUE_PLAN, base: 'Titan Greaves' },
+        { ...UNIQUE_PLAN, picks: PLAN.picks },
+        { ...UNIQUE_PLAN, defences: { armour: { min: 100 } } },
+        { ...UNIQUE_PLAN, totals: [{ statId: 'pseudo.pseudo_total_life', text: '+# total maximum Life', min: 40 }] },
+    ]) {
+        assert.throws(() => readSlotPlan(bad, 'p'), /a unique search has no slot plan/);
+    }
+});
+
+test('slot plans: socket filters (#58) need no item type and go on unique plans too', () => {
+    const sockets = {
+        slot: 'Body Armour',
+        itemType: null,
+        base: null,
+        picks: [],
+        sockets: { links: { min: 6, max: 6 }, sockets: { r: 3 } },
+    };
+    assert.deepEqual(readSlotPlan(sockets, 'p'), sockets);
+    const unique = { ...UNIQUE_PLAN, sockets: { links: { min: 5 } } };
+    assert.deepEqual(readSlotPlan(unique, 'p'), unique);
+    assert.equal('sockets' in readSlotPlan(PLAN, 'p'), false);
+});
+
+test('slot plans: socket filters are whole numbers from 0 to 6, min not above max', () => {
+    for (const [bad, path] of [
+        [{ links: { min: 7 } }, /sockets\.links\.min/],
+        [{ sockets: { r: -1 } }, /sockets\.sockets\.r/],
+        [{ sockets: { g: 1.5 } }, /sockets\.sockets\.g/],
+        [{ links: { min: 5, max: 4 } }, /sockets\.links: min above max/],
+        [{ sockets: { x: 1 } }, /sockets\.sockets/],
+        [{ abyss: { min: 1 } }, /sockets/],
+    ] as const) {
+        assert.throws(() => readSlotPlan({ ...PLAN, sockets: bad }, 'p'), path);
+    }
+});
+
+test('uniques.list: names a build, slot, target and item type; the result is checked', () => {
+    const params = { buildId: 'a.xml', slot: 'Boots', target: 'saved', itemType: 'Boots' };
+    assert.deepEqual(parseInvokeRequest({ method: 'uniques.list', params: params }).params, params);
+    assert.throws(() => parseInvokeRequest({ method: 'uniques.list', params: { ...params, itemType: '' } }), ValidationError);
+    const list = {
+        buildId: 'a.xml',
+        slot: 'Boots',
+        target: 'saved',
+        itemType: 'Boots',
+        cached: false,
+        uniques: [
+            {
+                name: "Kaom's Roots",
+                base: 'Titan Greaves',
+                tradeType: 'Titan Greaves',
+                change: -78,
+                changePct: -5.2,
+                weights: [{ statId: 'explicit.stat_3299347043', label: '+# to maximum Life', weight: 0.33 }],
+            },
+        ],
+    };
+    assert.deepEqual(METHOD_RESULTS['uniques.list'](list, 'r'), list);
+    const bad = { ...list, uniques: [{ ...list.uniques[0], change: 'worse' }] };
+    assert.throws(() => METHOD_RESULTS['uniques.list'](bad, 'r'), ValidationError);
+});
+
+test('run headers: socket filters are read, and a header saved before #58 reads as none', () => {
+    const header = {
+        runId: 'r1',
+        buildId: 'a.xml',
+        buildName: 'RF',
+        slot: 'Body Armour',
+        league: 'Covens',
+        budgetLabel: '300c',
+        budgetChaos: 300,
+        targetLabel: 'Full DPS',
+        depth: 'quick',
+        perBand: 20,
+        listing: 'securable',
+        minGainPct: 1,
+        blend: 0.5,
+        chaosPerDivine: 200,
+        startedAtMs: 0,
+        baselineDamage: 1e6,
+        baselineEhp: 5e4,
+        currentItem: 'Old Chest',
+        currentView: null,
+        weightedStats: 20,
+        hardNeeds: [],
+        plan: null,
+        unique: null,
+        uniqueNotes: [],
+        levelFilter: 'Off',
+        searchedFor: [],
+        bands: [],
+    };
+    assert.deepEqual(readRunHeader({ ...header, sockets: ['Links ≥ 6'] }, 'h').sockets, ['Links ≥ 6']);
+    assert.deepEqual(readRunHeader(header, 'h').sockets, []);
+    assert.throws(() => readRunHeader({ ...header, sockets: [1] }, 'h'), /h.sockets/);
+});
+
+test('plan checks: a socket check is a known kind', () => {
+    assert.ok(PLAN_CHECK_KINDS.includes('socket'));
 });

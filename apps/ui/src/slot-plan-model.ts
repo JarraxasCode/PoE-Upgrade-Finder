@@ -3,34 +3,47 @@
 // Main has the last word: core's checkPlan runs on every plan in the weight review and before a run; the
 // rules here only steer the user away from picks it would refuse.
 
-import { DEFENCE_KINDS, MAX_PLAN_TOTALS, SLOT_ITEM_TYPES } from '@poe-upgrade-finder/ipc';
+import type { BaseOption, ImplicitOption, SlotEditorData, StatOption, TotalOption } from '@poe-upgrade-finder/ipc';
+import {
+    DEFENCE_KINDS,
+    hasSockets,
+    isGenericType,
+    MAX_INFLUENCES,
+    MAX_SOCKET_VALUE,
+    MAX_TOTALS,
+    PLAIN_AFFIXES,
+    slotItemTypes,
+    SOCKET_ENDS,
+    SOCKET_ROWS,
+    socketRowText,
+} from '@poe-upgrade-finder/vocab';
 import type {
-    BaseOption,
+    AffixLimits,
+    BaseAffixes,
     DefenceKind,
     DefenceRange,
     GearSlot,
-    ImplicitOption,
     ModPick,
     ModPosition,
     ModRule,
-    ModSource,
     PickStat,
     PlanDefences,
+    PlanSockets,
     PlanTotal,
-    SlotEditorData,
     SlotInfluence,
+    SocketEnd,
+    SocketRange,
+    SocketRow,
+    UniqueChoice,
     SlotModType,
     SlotPlan,
-    StatOption,
-    TotalOption,
-} from '@poe-upgrade-finder/ipc';
+    SlotSource,
+} from '@poe-upgrade-finder/vocab';
 
-/** Rows per side, as on an item. */
+/** Affix rows always shown per side (more appear one at a time on a base that takes more: issue #37). */
 export const AFFIX_ROWS: number = 3;
 /** Implicit rows: the base's own, one Exarch and one Eater, or a corrupted one; a spare row while under it. */
 export const IMPLICIT_ROWS: number = 3;
-/** An item has at most two influences (core's MAX_INFLUENCES). */
-const MAX_INFLUENCES: number = 2;
 
 /** What a row can pick: an affix, an eldritch or corrupted implicit, or the base's own implicit. */
 export interface PlanOption {
@@ -42,7 +55,7 @@ export interface PlanOption {
     readonly group: string | null;
     readonly influence: SlotInfluence;
     /** Natural when any merged mod rolls naturally; else its other source (crafted, essence, veiled...). */
-    readonly source: ModSource;
+    readonly source: SlotSource;
     /** The trade site's order for its stats (ModOption.rank); null when unknown. */
     readonly rank: number | null;
     readonly text: string;
@@ -214,8 +227,34 @@ export function excludeRows(plan: SlotPlan): readonly number[] {
     return out;
 }
 
-export function rowLimit(position: ModPosition): number {
-    return position === 'implicit' ? IMPLICIT_ROWS : AFFIX_ROWS;
+/**
+ * What the plan's base allows on its affixes (issue #37): the chosen base's own, or with any base the most any
+ * base of the type allows on each side. Main's check counts per base; this only sizes the rows and the bounds.
+ */
+export function planAffixes(data: SlotEditorData, base: string | null): BaseAffixes {
+    const bases: readonly BaseOption[] = data.bases.filter((b: BaseOption) => base === null || b.name === base);
+    if (bases.length === 0) {
+        return PLAIN_AFFIXES;
+    }
+    const most = (read: (b: BaseOption) => AffixLimits): AffixLimits => ({
+        prefix: Math.max(...bases.map((b: BaseOption) => read(b).prefix)),
+        suffix: Math.max(...bases.map((b: BaseOption) => read(b).suffix)),
+    });
+    return { limits: most((b: BaseOption) => b.affixes.limits), magnitudes: most((b: BaseOption) => b.affixes.magnitudes) };
+}
+
+/** How many includes a position takes: the implicit rows, or the base's prefixes or suffixes. */
+export function rowLimit(position: ModPosition, affixes: BaseAffixes = PLAIN_AFFIXES): number {
+    return position === 'implicit' ? IMPLICIT_ROWS : position === 'prefix' ? affixes.limits.prefix : affixes.limits.suffix;
+}
+
+/** Empty rows to show: up to 3 affix rows as on an item, then one spare while the base takes more; implicits one spare. */
+export function emptyRows(position: ModPosition, included: number, affixes: BaseAffixes = PLAIN_AFFIXES): number {
+    const limit: number = rowLimit(position, affixes);
+    if (position === 'implicit' || included >= AFFIX_ROWS) {
+        return included < limit ? 1 : 0;
+    }
+    return Math.max(0, Math.min(limit, AFFIX_ROWS) - included);
 }
 
 /**
@@ -237,8 +276,25 @@ export function conflictOf(
     }
     const statIds: readonly string[] = option.stats.map((s: StatOption) => s.statId);
     const otherRule: ModRule = rule === 'include' ? 'exclude' : 'include';
-    if (others.some((o) => o.pick.rule === otherRule && o.pick.stats.some((s: PickStat) => statIds.includes(s.statId)))) {
-        return rule === 'include' ? 'The plan excludes this stat' : 'The plan includes this stat';
+    // The same rule as core's checkPlan (#38): a hybrid exclude drops only its own mod, so it clashes only with an
+    // include that carries all of its stats; a Not-group exclude clashes with any include of its stat.
+    const isHybrid = (position: ModPick['position'], ids: readonly string[]): boolean => position !== 'implicit' && ids.length > 1;
+    for (const o of others) {
+        if (o.pick.rule !== otherRule) {
+            continue;
+        }
+        const theirs: readonly string[] = o.pick.stats.map((s: PickStat) => s.statId);
+        const [excludeIds, excludeHybrid, includeIds] =
+            rule === 'exclude'
+                ? [statIds, isHybrid(option.position, statIds), theirs]
+                : [theirs, isHybrid(o.pick.position, theirs), statIds];
+        const clashes: boolean = excludeHybrid
+            ? excludeIds.every((id: string) => includeIds.includes(id))
+            : excludeIds.some((id: string) => includeIds.includes(id));
+        if (clashes) {
+            const what: string = excludeHybrid ? 'mod' : 'stat';
+            return rule === 'include' ? `The plan excludes this ${what}` : `The plan includes this ${what}`;
+        }
     }
     if (rule === 'exclude') {
         return undefined;
@@ -289,12 +345,15 @@ export function pickProblem(options: readonly PlanOption[], plan: SlotPlan, inde
 export interface StatBounds {
     /** The lowest single roll, as the mod reads. */
     readonly low: number;
-    /** The most the stat can total on the item: the best mod per group, at most 3 per side (or the implicit rows). */
+    /**
+     * The most the stat can total on the item: the best mod per group, as many per side as the base takes (or the
+     * implicit rows), raised by the base's magnitude bonus on that side (issue #37).
+     */
     readonly high: number;
 }
 
 /** Bounds for a picked stat, over the options read the same way (a "reduced" stat only counts "reduced" mods). */
-export function statBounds(options: readonly PlanOption[], stat: StatOption): StatBounds | undefined {
+export function statBounds(options: readonly PlanOption[], stat: StatOption, affixes: BaseAffixes = PLAIN_AFFIXES): StatBounds | undefined {
     if (stat.roll === null) {
         return undefined;
     }
@@ -322,9 +381,13 @@ export function statBounds(options: readonly PlanOption[], stat: StatOption): St
             .filter((v) => v.side === side)
             .map((v) => v.value)
             .sort((a: number, b: number) => b - a);
-        high += values.slice(0, rowLimit(side)).reduce((a: number, b: number) => a + b, 0);
+        const sum: number = values.slice(0, rowLimit(side, affixes)).reduce((a: number, b: number) => a + b, 0);
+        // The base's magnitude bonus raises that side's values ("50% increased Suffix Modifier magnitudes"). How the
+        // game rounds them isn't modelled: unrounded, the bound is never below what can roll.
+        const bonus: number = side === 'implicit' ? 0 : side === 'prefix' ? affixes.magnitudes.prefix : affixes.magnitudes.suffix;
+        high += sum * (1 + bonus / 100);
     }
-    return { low: low, high: Math.max(high, stat.roll[1]) };
+    return { low: low, high: Math.max(Math.round(high * 100) / 100, stat.roll[1]) };
 }
 
 /** A typed roll: empty is "no limit", a number is a value, anything else is refused. */
@@ -394,7 +457,7 @@ export interface ListedOption {
 }
 
 /** Natural mods first, then each other source as its own group at the bottom, as the trade site groups crafted and veiled. */
-const SOURCE_ORDER: readonly ModSource[] = [
+const SOURCE_ORDER: readonly SlotSource[] = [
     'natural',
     'fossil',
     'essence',
@@ -475,7 +538,7 @@ export function optionLabel(option: PlanOption): string {
 
 /** "Exarch", "Exarch or Corrupted", "Base implicit", "Shaper prefix". */
 /** How each source reads on its tag; natural mods have none. */
-export const SOURCE_LABELS: Readonly<Record<ModSource, string>> = {
+export const SOURCE_LABELS: Readonly<Record<SlotSource, string>> = {
     natural: '',
     fossil: 'Fossil',
     crafted: 'Crafted',
@@ -500,22 +563,68 @@ export function kindLabel(option: PlanOption): string {
 
 // Edits -------------------------------------------------------------------------------------------------------------
 
-/** The item type the editor shows: the plan's, else what's equipped (when the slot holds it), else the slot's first. */
-export function editorItemType(slot: GearSlot, plan: SlotPlan, equippedType: string | null): string {
-    const types: readonly string[] = SLOT_ITEM_TYPES[slot];
+/**
+ * The item type the editor shows: the plan's, else what's equipped (when the slot can pick it), else the first the
+ * slot can pick. weapon1Type is what Weapon 1 holds (null: empty): Weapon 2's types depend on it (#39). Call it
+ * only once the build's gear is known: guessing it would save a made-up type into the plan (#36).
+ */
+export function editorItemType(slot: GearSlot, plan: SlotPlan, equippedType: string | null, weapon1Type: string | null): string {
+    const types: readonly string[] = slotItemTypes(slot, weapon1Type);
     if (plan.itemType !== null) {
         return plan.itemType;
     }
     if (equippedType !== null && types.includes(equippedType)) {
         return equippedType;
     }
+    // An empty Weapon 1: PoB's own search is weapon.one, the one-handed generic type (TradeHelpers.getTradeCategory).
+    if (slot === 'Weapon 1' && equippedType === null) {
+        return 'One-handed weapon';
+    }
     return types[0] ?? slot;
 }
 
-/** A plan with a base, mods or defences names its item type; one with none and the equipped type goes back to empty. */
+/**
+ * The item type a unique search lists uniques for (#113): the editor's, but never a generic weapon type ("Any
+ * weapon" is a trade category, not a PoB item type): then the equipped item's, else the slot's first type.
+ */
+export function uniqueItemType(slot: GearSlot, plan: SlotPlan, equippedType: string | null, weapon1Type: string | null): string {
+    const t: string = editorItemType(slot, plan, equippedType, weapon1Type);
+    if (!isGenericType(t)) {
+        return t;
+    }
+    return equippedType ?? slotItemTypes(slot, weapon1Type).find((x: string) => !isGenericType(x)) ?? slot;
+}
+
+/**
+ * The plan a search sends for the slot (#113): the rare plan in Rare mode (a stored unique stays stored), the
+ * picked unique alone in Unique mode, or null in Unique mode with nothing picked yet.
+ */
+export function runPlanFor(slot: GearSlot, rarePlan: SlotPlan, choice: UniqueChoice | undefined, itemType: string): SlotPlan | null {
+    if (choice === undefined || choice.mode === 'rare') {
+        return rarePlan;
+    }
+    if (choice.unique === null) {
+        return null;
+    }
+    // The slot's socket filters (#58) go with it: they're about the item wanted, whichever mode.
+    return {
+        slot: slot,
+        itemType: itemType,
+        base: null,
+        picks: [],
+        unique: choice.unique,
+        ...(rarePlan.sockets === undefined ? {} : { sockets: rarePlan.sockets }),
+    };
+}
+
+/**
+ * A plan with a base, mods or defences names its item type; one with none and the equipped type goes back to empty.
+ * A generic weapon type (#39) always stays: it's a category of its own, never what an empty plan searches.
+ */
 function settle(plan: SlotPlan, itemType: string, equippedType: string | null): SlotPlan {
+    // Socket filters need no item type (#58), so they don't keep one.
     const bare: boolean = plan.base === null && plan.picks.length === 0 && setDefences(plan).length === 0 && totalsOf(plan).length === 0;
-    if (bare && (itemType === equippedType || equippedType === null)) {
+    if (bare && !isGenericType(itemType) && (itemType === equippedType || equippedType === null)) {
         return { ...plan, itemType: null };
     }
     return { ...plan, itemType: itemType };
@@ -526,10 +635,17 @@ export function withItemType(plan: SlotPlan, itemType: string, equippedType: str
     if (plan.itemType === itemType) {
         return plan;
     }
-    // The totals aren't tied to a type: they stay.
+    // The totals and socket filters aren't tied to a type: they stay.
     const totals: readonly PlanTotal[] = totalsOf(plan);
     return settle(
-        { slot: plan.slot, itemType: itemType, base: null, picks: [], ...(totals.length === 0 ? {} : { totals: totals }) },
+        {
+            slot: plan.slot,
+            itemType: itemType,
+            base: null,
+            picks: [],
+            ...(totals.length === 0 ? {} : { totals: totals }),
+            ...(plan.sockets === undefined ? {} : { sockets: plan.sockets }),
+        },
         itemType,
         equippedType,
     );
@@ -677,6 +793,81 @@ export function defenceSummaryParts(plan: SlotPlan): readonly string[] {
     });
 }
 
+// Socket filters (#58) ------------------------------------------------------------------------------------------
+
+/** A plan that searches as v0.1 did: no item type, base, mods, defences, totals or socket filters. */
+export function isBlankPlan(plan: SlotPlan): boolean {
+    return (
+        plan.itemType === null &&
+        plan.base === null &&
+        plan.picks.length === 0 &&
+        setDefences(plan).length === 0 &&
+        totalsOf(plan).length === 0 &&
+        !hasSockets(plan)
+    );
+}
+
+/** A typed socket value: empty is "no limit", a whole number from 0 to 6 is a value, anything else is refused. */
+export function parseSocketValue(text: string): number | null | undefined {
+    const t: string = text.trim();
+    if (t === '') {
+        return null;
+    }
+    const n: number = Number(t);
+    return Number.isInteger(n) && n >= 0 && n <= MAX_SOCKET_VALUE ? n : undefined;
+}
+
+/** A socket filter row as typed: saved only when every box reads and min is not above max (ipc refuses that). */
+export type SocketRowRead = { readonly ok: true; readonly range: SocketRange } | { readonly ok: false; readonly problem: string };
+
+export function socketRowFromTexts(texts: Readonly<Record<SocketEnd, string>>): SocketRowRead {
+    const range: Partial<Record<SocketEnd, number>> = {};
+    for (const end of SOCKET_ENDS) {
+        const v: number | null | undefined = parseSocketValue(texts[end]);
+        if (v === undefined) {
+            return { ok: false, problem: 'Type a whole number from 0 to 6, or leave it empty.' };
+        }
+        if (v !== null) {
+            range[end] = v;
+        }
+    }
+    if (range.min !== undefined && range.max !== undefined && range.min > range.max) {
+        return { ok: false, problem: 'The min is above the max.' };
+    }
+    return { ok: true, range: range };
+}
+
+/** Replaces one socket filter row; an empty row goes, and an empty filter. */
+export function withSocketRow(plan: SlotPlan, row: SocketRow, range: SocketRange): SlotPlan {
+    const next: Partial<Record<SocketRow, SocketRange>> = { ...plan.sockets };
+    if (Object.keys(range).length === 0) {
+        delete next[row];
+    } else {
+        next[row] = range;
+    }
+    const { sockets: _old, ...rest } = plan;
+    const sockets: PlanSockets = next;
+    return Object.keys(sockets).length === 0 ? rest : { ...rest, sockets: sockets };
+}
+
+/** Sets one field of a socket filter row (null clears it); an empty row goes, and an empty filter. No item type needed. */
+export function withSocket(plan: SlotPlan, row: SocketRow, end: SocketEnd, value: number | null): SlotPlan {
+    const range: Partial<Record<SocketEnd, number>> = { ...plan.sockets?.[row] };
+    if (value === null) {
+        delete range[end];
+    } else {
+        range[end] = value;
+    }
+    return withSocketRow(plan, row, range);
+}
+
+/** Each set socket filter row in short ("Sockets 6", "Links ≥ 5, 3 R"), in the site's order. */
+export function socketSummaryParts(plan: SlotPlan): readonly string[] {
+    return SOCKET_ROWS.filter((row: SocketRow) => Object.keys(plan.sockets?.[row] ?? {}).length > 0).map((row: SocketRow) =>
+        socketRowText(row, plan.sockets?.[row] ?? {}),
+    );
+}
+
 // Totals (issue #26) ----------------------------------------------------------------------------------------------
 
 /** The plan's totals (none when missing). */
@@ -691,10 +882,10 @@ function withTotals(plan: SlotPlan, totals: readonly PlanTotal[], itemType: stri
     return settle(totals.length === 0 ? named : { ...named, totals: totals }, itemType, equippedType);
 }
 
-/** Adds a total (once; at most MAX_PLAN_TOTALS), with no range yet. */
+/** Adds a total (once; at most MAX_TOTALS), with no range yet. */
 export function withTotal(plan: SlotPlan, option: TotalOption, itemType: string, equippedType: string | null): SlotPlan {
     const totals: readonly PlanTotal[] = totalsOf(plan);
-    if (totals.length >= MAX_PLAN_TOTALS || totals.some((t: PlanTotal) => t.statId === option.id)) {
+    if (totals.length >= MAX_TOTALS || totals.some((t: PlanTotal) => t.statId === option.id)) {
         return plan;
     }
     return withTotals(plan, [...totals, { statId: option.id, text: option.text }], itemType, equippedType);

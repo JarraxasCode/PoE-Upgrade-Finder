@@ -4,7 +4,8 @@
 //
 // Retries: a 5xx, a timeout or a network error gets one retry, through the limiter. A 429 gets one retry
 // too: the limiter has recorded its Retry-After, so the retry waits it out, or stops the run with
-// RateLimitStop when the wait is 5 minutes or more.
+// RateLimitStop when the wait is 5 minutes or more. A second 429 in a row means the limiter's picture is wrong
+// (e.g. the browser searching on the same account): it is a 'rate-limited' error, which stops the run (#79).
 
 import { ValidationError } from '@poe-upgrade-finder/validate';
 import type { HttpMethod, HttpOutcome, HttpTransport } from './http.ts';
@@ -34,6 +35,8 @@ export type TradeErrorCode =
     | 'signed-out'
     /** A redirect (the site sends signed-out API calls to the login page). */
     | 'redirect'
+    /** A 429 again right after waiting one out: stop rather than retry into a lockout. */
+    | 'rate-limited'
     /** The site answered with its own error body, e.g. code 2 "Query is too complex". */
     | 'site-error'
     | 'http'
@@ -133,8 +136,8 @@ export class TradeClient {
         });
     }
 
-    /** Fetches up to 10 listings. queryId is optional (V16: ids from several searches can be mixed). */
-    public fetch(ids: readonly string[], queryId?: string, signal?: AbortSignal): Promise<FetchResponse> {
+    /** Fetches up to 10 listings. queryId is optional (V16: ids from several searches can be mixed). Rejects on 0 or over 10 ids. */
+    public async fetch(ids: readonly string[], queryId?: string, signal?: AbortSignal): Promise<FetchResponse> {
         if (ids.length === 0 || ids.length > MAX_FETCH_IDS) {
             throw new RangeError(`fetch takes 1 to ${MAX_FETCH_IDS} ids, got ${ids.length}`);
         }
@@ -163,27 +166,11 @@ export class TradeClient {
         });
     }
 
-    /**
-     * The site's bulk exchange. Not used for the divine rate (V13: it is a different market from the in-game
-     * Currency Exchange); kept because it shares the limiter and the spike exercised it.
-     */
-    public exchange(league: string, body: unknown, signal?: AbortSignal): Promise<unknown> {
-        return this.call({
-            policy: 'exchange',
-            method: 'POST',
-            path: `/api/trade/exchange/${encodeURIComponent(league)}`,
-            body: body,
-            signal: signal,
-            read: (json: unknown) => json,
-            summary: () => ({}),
-        });
-    }
-
     private async call<T>(spec: CallSpec<T>): Promise<T> {
         const reqId: number = ++this.seq;
         const bodyText: string | undefined = spec.body === undefined ? undefined : JSON.stringify(spec.body);
-        let lastError: TradeError | undefined;
-        for (let attempt: number = 1; attempt <= 2; attempt++) {
+        // At most two attempts: every path through the second one returns or throws.
+        for (let attempt: number = 1; ; attempt++) {
             const started: number = this.now();
             const outcome: HttpOutcome = await this.limiter.schedule(
                 spec.policy,
@@ -232,9 +219,13 @@ export class TradeClient {
                     error: message,
                     status: outcome.kind === 'redirect' ? outcome.status : null,
                 });
-                lastError = new TradeError(code, `${spec.policy}: ${message}`, outcome.kind === 'redirect' ? outcome.status : undefined);
-                if (code === 'redirect') {
-                    throw lastError;
+                const error: TradeError = new TradeError(
+                    code,
+                    `${spec.policy}: ${message}`,
+                    outcome.kind === 'redirect' ? outcome.status : undefined,
+                );
+                if (code === 'redirect' || attempt >= 2) {
+                    throw error;
                 }
                 continue;
             }
@@ -247,7 +238,6 @@ export class TradeClient {
             }
             return result;
         }
-        throw lastError ?? new TradeError('http', `${spec.policy}: failed after retry`);
     }
 
     private handleResponse<T>(
@@ -300,6 +290,14 @@ export class TradeClient {
         this.logger.log('warn', `${spec.method} ${spec.path} -> ${outcome.status}`, data);
         if (retryable && attempt === 1) {
             return 'retry';
+        }
+        if (outcome.status === 429) {
+            return new TradeError(
+                'rate-limited',
+                `${spec.policy}: rate limited again after waiting out the first limit. Stopping so the account isn't locked out; wait a few minutes before searching again.`,
+                outcome.status,
+                siteError?.code,
+            );
         }
         if (siteError !== undefined) {
             return new TradeError('site-error', `${spec.policy}: ${siteError.message}`, outcome.status, siteError.code);

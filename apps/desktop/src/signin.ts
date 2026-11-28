@@ -8,6 +8,7 @@ import { POE_ORIGIN, TradeClient, TradeError } from '@poe-upgrade-finder/trade';
 import type { TradeLogger, TradeSearchBody } from '@poe-upgrade-finder/trade';
 import { isAllowedSignInUrl } from './signin-hosts.ts';
 import { APP_ICON_FILE } from './ui/main-window.ts';
+import { messageOf } from '@poe-upgrade-finder/validate';
 
 export const TRADE_PARTITION: string = 'persist:poe-trade';
 
@@ -17,7 +18,7 @@ const PROBE: TradeSearchBody = {
         status: { option: 'securable' },
         stats: [{ type: 'and', filters: [] }],
         filters: {
-            type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'nonunique' } } },
+            type_filters: { filters: { category: { option: 'armour.boots' }, rarity: { option: 'rare' } } },
             trade_filters: { filters: { price: { max: 1, option: 'chaos' } } },
         },
     },
@@ -98,7 +99,10 @@ export function openSignInWindow(logger: TradeLogger): Promise<void> {
             logger.log('info', 'Sign-in window closed');
             resolve();
         });
-        void win.loadURL(`${POE_ORIGIN}/login`);
+        win.loadURL(`${POE_ORIGIN}/login`).catch((error: unknown) => {
+            // A redirect or a closed window aborts the load; the window itself shows the rest.
+            logger.log('warn', 'sign-in page load did not finish', { error: messageOf(error) });
+        });
     });
 }
 

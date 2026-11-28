@@ -2,8 +2,9 @@
 
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import type { ModPick, SlotPlan, TotalOption } from '@poe-upgrade-finder/ipc';
+import type { TotalOption } from '@poe-upgrade-finder/ipc';
 import { listTotals, totalsOf, withItemType, withoutTotal, withPick, withTotal, withTotalRange } from '../src/slot-plan-model.ts';
+import type { ModPick, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 const LIFE: TotalOption = { id: 'pseudo.pseudo_total_life', text: '+# total maximum Life', counts: "half of the item's Strength" };
 const DEX: TotalOption = { id: 'pseudo.pseudo_total_dexterity', text: '+# total to Dexterity', counts: '+all Attributes' };

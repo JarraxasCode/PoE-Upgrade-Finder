@@ -2,7 +2,7 @@
 // these are simple drawn glyphs, coloured by CSS (fill/stroke follow currentColor; the CSP allows inline SVG).
 
 import type { JSX } from 'preact';
-import type { SlotInfluence } from '@poe-upgrade-finder/ipc';
+import type { SlotInfluence } from '@poe-upgrade-finder/vocab';
 
 /** The influences and the two eldritch implicit sources. */
 export type MarkKind = 'shaper' | 'elder' | 'crusader' | 'redeemer' | 'hunter' | 'warlord' | 'exarch' | 'eater';

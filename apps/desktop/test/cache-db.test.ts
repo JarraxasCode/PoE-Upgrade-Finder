@@ -4,10 +4,10 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { test } from 'node:test';
 import { readSlotData, readTradeQuery } from '@poe-upgrade-finder/engine-client';
-import type { SlotData, TradeQueryData } from '@poe-upgrade-finder/engine-client';
+import type { SlotData, TradeQueryData, UniquesData } from '@poe-upgrade-finder/engine-client';
 import { sampleSlotDataJson } from '../../../packages/engine-client/test/slotdata-sample.ts';
 import type { BuildSummary } from '@poe-upgrade-finder/ipc';
-import { CacheDb, generatorKey, summaryKey } from '../src/services/cache-db.ts';
+import { CacheDb, generatorKey, summaryKey, uniquesKey } from '../src/services/cache-db.ts';
 
 function sampleQuery(): TradeQueryData {
     return readTradeQuery({
@@ -29,7 +29,14 @@ test('cache file: rates and generator results survive a reopen; reads are checke
     const dir: string = mkdtempSync(join(tmpdir(), 'uf-cache-'));
     const file: string = join(dir, 'cache.sqlite');
     try {
-        const key: string = generatorKey({ xmlHash: 'abc', slot: 'Boots', target: { kind: 'saved' }, blend: 0.5, pobVersion: '2.67.2' });
+        const key: string = generatorKey({
+            xmlHash: 'abc',
+            slot: 'Boots',
+            target: { kind: 'saved' },
+            blend: 0.5,
+            pobVersion: '2.67.2',
+            source: 'pob',
+        });
         const db: CacheDb = new CacheDb(file);
         db.rateStore().set('Covens', { chaosPerDivine: 216.8, source: 'ggg', hour: 1_795_000_000, at: 1 });
         db.saveGenerator(key, sampleQuery());
@@ -51,8 +58,18 @@ test('cache file: rates and generator results survive a reopen; reads are checke
 });
 
 test('generator keys change with the build, slot, target, blend and PoB version', () => {
-    const base = { xmlHash: 'abc', slot: 'Boots', target: { kind: 'saved' } as const, blend: 0.5, pobVersion: '2.67.2' };
+    const base = {
+        xmlHash: 'abc',
+        slot: 'Boots',
+        target: { kind: 'saved' } as const,
+        blend: 0.5,
+        pobVersion: '2.67.2',
+        source: 'pob',
+    } as const;
     const k: string = generatorKey(base);
+    // PoB's keys hash without a source, as before the key had one (v0.2). GENERATOR_DATA 3 (#109) drops the rows
+    // cached before it: this key was 71ced8e5… with GENERATOR_DATA 2.
+    assert.equal(k, 'a5d9855ba3943d29066fef44ba01586d8fbd624bd248da9e0bfcbdd82968ef9d');
     assert.equal(generatorKey({ ...base }), k);
     for (const changed of [
         { xmlHash: 'abd' },
@@ -140,6 +157,63 @@ test('build summary: kept per save hash, target, PoB and app version; any change
         ]) {
             assert.equal(again.buildSummary(summaryKey(changed)), undefined);
         }
+        again.close();
+    } finally {
+        rmSync(dir, { recursive: true, force: true });
+    }
+});
+
+const UNIQUES: UniquesData = {
+    slot: 'Boots',
+    itemType: 'Boots',
+    target: { kind: 'fullDps', saved: true },
+    uniques: [
+        {
+            name: "Kaom's Roots",
+            base: 'Titan Greaves',
+            tradeType: 'Titan Greaves',
+            variant: 2,
+            variants: 2,
+            scoreLow: 1405,
+            scoreMid: 1413,
+            scoreHigh: 1422,
+            change: -78,
+            weights: [{ id: 'explicit.stat_3299347043', weight: 0.33, line: '+(150-200) to maximum Life' }],
+            rolls: [],
+            statIds: ['explicit.stat_3299347043'],
+            unmatched: [],
+        },
+    ],
+};
+
+test('uniques: cached per key, survive a reopen, and go with the generator rows', () => {
+    const dir: string = mkdtempSync(join(tmpdir(), 'uf-cache-'));
+    const file: string = join(dir, 'cache.sqlite');
+    try {
+        const key: string = uniquesKey({
+            xmlHash: 'abc',
+            slot: 'Boots',
+            itemType: 'Boots',
+            target: { kind: 'saved' },
+            blend: 0.5,
+            pobVersion: '2.68.1',
+        });
+        assert.notEqual(
+            key,
+            uniquesKey({ xmlHash: 'abc', slot: 'Boots', itemType: 'Boots', target: { kind: 'saved' }, blend: 0.6, pobVersion: '2.68.1' }),
+        );
+        assert.notEqual(
+            key,
+            uniquesKey({ xmlHash: 'abc', slot: 'Ring 1', itemType: 'Boots', target: { kind: 'saved' }, blend: 0.5, pobVersion: '2.68.1' }),
+        );
+        const db: CacheDb = new CacheDb(file);
+        db.saveUniques(key, UNIQUES);
+        db.close();
+        const again: CacheDb = new CacheDb(file);
+        assert.deepEqual(again.uniques(key), UNIQUES);
+        assert.equal(again.uniques('other'), undefined);
+        again.clearGenerator();
+        assert.equal(again.uniques(key), undefined);
         again.close();
     } finally {
         rmSync(dir, { recursive: true, force: true });

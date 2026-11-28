@@ -7,30 +7,21 @@
 // can't be held against a candidate, so it is reported as skipped rather than failing every item. It's the
 // same rule the strip step uses: a floor that already fails with the current item stays soft.
 
-import { boolean, number, record, ValidationError } from '@poe-upgrade-finder/validate';
-import type { JsonRecord } from '@poe-upgrade-finder/validate';
-import type { CheckResult, CheckSource, ItemCheck, RequirementSource, RunContext, SearchRequirement, SlotId } from './spec.ts';
-import { ATTRIBUTES, ELEMENTS, maxRes, stat } from './stats.ts';
-import type { Attribute, Element, PobStats } from './stats.ts';
-
-/** Per build (Settings). Omitted entries are off. */
-export interface FloorSettings {
-    readonly chaosResMin?: number;
-    readonly maxResMin?: Readonly<Partial<Record<Element, number>>>;
-    readonly elementalResCapped?: boolean;
-    readonly spellBlockMin?: number;
-    readonly attributesMet?: boolean;
-    readonly targets?: {
-        readonly chaosRes?: number;
-        readonly maxRes?: Readonly<Partial<Record<Element, number>>>;
-        /** Overcap wanted per element. */
-        readonly overcapMin?: number;
-    };
-    /** Life loss is flagged on every slot except the weapons. */
-    readonly flagLifeLoss?: boolean;
-    /** Net life regen turning negative, on builds with a degen (NetLifeRegen present). */
-    readonly flagNetRegen?: boolean;
-}
+import { ATTRIBUTES, ELEMENTS } from '@poe-upgrade-finder/vocab';
+import type { Attribute, Element, FloorSettings } from '@poe-upgrade-finder/vocab';
+import type {
+    CheckResult,
+    ItemCheck,
+    ItemTotalKey,
+    ItemTotals,
+    RunContext,
+    SearchRequirement,
+    SlotId,
+    SpecContribution,
+    SpecSource,
+} from './spec.ts';
+import { maxRes, stat } from './stats.ts';
+import type { PobStats } from './stats.ts';
 
 /** PLAN.md's values. Thanks to the skip rule they only bite where the build already meets them. */
 export const DEFAULT_FLOORS: FloorSettings = {
@@ -43,82 +34,6 @@ export const DEFAULT_FLOORS: FloorSettings = {
     flagLifeLoss: true,
     flagNetRegen: true,
 };
-
-function readPerElement(value: unknown, path: string): Partial<Record<Element, number>> {
-    const r: JsonRecord = record(value, path);
-    const out: Partial<Record<Element, number>> = {};
-    for (const [key, v] of Object.entries(r)) {
-        const el: Element | undefined = ELEMENTS.find((e: Element) => e === key);
-        if (el === undefined) {
-            throw new ValidationError(`${path}.${key}: not an element (Fire, Cold, Lightning)`);
-        }
-        out[el] = number(v, `${path}.${key}`);
-    }
-    return out;
-}
-
-/**
- * Per-build floor settings from JSON (Settings, or the headless mode's --floors file), on top of the
- * defaults. Each field is checked; null turns a default off; unknown fields are errors.
- */
-export function readFloorSettings(value: unknown, base: FloorSettings = DEFAULT_FLOORS): FloorSettings {
-    const r: JsonRecord = record(value, 'floors');
-    const out: { -readonly [K in keyof FloorSettings]: FloorSettings[K] } = { ...base };
-    for (const [key, v] of Object.entries(r)) {
-        const path: string = `floors.${key}`;
-        switch (key) {
-            case 'chaosResMin':
-            case 'spellBlockMin':
-            case 'elementalResCapped':
-            case 'attributesMet':
-            case 'flagLifeLoss':
-            case 'flagNetRegen':
-            case 'maxResMin':
-            case 'targets':
-                if (v === null) {
-                    delete out[key];
-                    continue;
-                }
-                break;
-            default:
-                throw new ValidationError(`${path}: unknown floor setting`);
-        }
-        switch (key) {
-            case 'chaosResMin':
-            case 'spellBlockMin':
-                out[key] = number(v, path);
-                break;
-            case 'elementalResCapped':
-            case 'attributesMet':
-            case 'flagLifeLoss':
-            case 'flagNetRegen':
-                out[key] = boolean(v, path);
-                break;
-            case 'maxResMin':
-                out[key] = readPerElement(v, path);
-                break;
-            case 'targets': {
-                const t: JsonRecord = record(v, path);
-                const targets: { chaosRes?: number; maxRes?: Partial<Record<Element, number>>; overcapMin?: number } = {};
-                for (const [tk, tv] of Object.entries(t)) {
-                    if (tv === null) {
-                        continue;
-                    }
-                    if (tk === 'chaosRes' || tk === 'overcapMin') {
-                        targets[tk] = number(tv, `${path}.${tk}`);
-                    } else if (tk === 'maxRes') {
-                        targets.maxRes = readPerElement(tv, `${path}.maxRes`);
-                    } else {
-                        throw new ValidationError(`${path}.${tk}: unknown target (chaosRes, maxRes, overcapMin)`);
-                    }
-                }
-                out[key] = targets;
-                break;
-            }
-        }
-    }
-    return out;
-}
 
 const ATTRIBUTE_NAMES: Readonly<Record<Attribute, string>> = { Str: 'strength', Dex: 'dexterity', Int: 'intelligence' };
 const WEAPON_SLOTS: ReadonlySet<SlotId> = new Set<SlotId>(['Weapon 1', 'Weapon 2']);
@@ -313,11 +228,11 @@ function netRegenFlag(): ItemCheck {
     };
 }
 
-/** v1's check source: the build's floors, targets and flags (v2 adds per-slot floors). */
-export const buildFloors: CheckSource = {
+/** The build's floors, targets and flags as checks. */
+export const buildFloors: SpecSource = {
     id: 'build-floors',
-    checksFor(context: RunContext): readonly ItemCheck[] {
-        return floorChecks(context.floors, context.slot);
+    contribute(context: RunContext): SpecContribution {
+        return { checks: floorChecks(context.floors, context.slot) };
     },
 };
 
@@ -330,21 +245,46 @@ const RES_STAT: Readonly<Record<Element | 'Chaos', string>> = {
     Chaos: 'pseudo.pseudo_total_chaos_resistance',
 };
 
-function need(statId: string, min: number, label: string): SearchRequirement {
-    return { statId: statId, min: Math.ceil(min), origin: 'strip', label: `Required: ${label} ≥ ${Math.ceil(min)}, from strip` };
+/**
+ * One hard need: the gap, capped at what the current item carries on that total (#34). Undefined when the item
+ * carries none of it: the need stays soft, like a floor that already failed.
+ */
+function need(
+    statId: string,
+    gap: number,
+    label: string,
+    totals: ItemTotals | undefined,
+    key: ItemTotalKey,
+): SearchRequirement | undefined {
+    const own: number | undefined = totals?.[key];
+    if (own !== undefined && own <= 0) {
+        return undefined;
+    }
+    const capped: boolean = own !== undefined && own < gap;
+    const min: number = Math.ceil(capped && own !== undefined ? own : gap);
+    return {
+        statId: statId,
+        min: min,
+        ...(capped ? { gap: Math.ceil(gap) } : {}),
+        origin: 'strip',
+        label: `Required: ${label} ≥ ${min}, from strip`,
+    };
 }
 
 /**
  * A floor that passes with the current item and fails after the strip becomes a required (And) filter with
- * min = floor − value after strip, from PoB's uncapped totals. Always achievable: the current item supplied
- * at least that much. A floor already failing stays soft (its stat stays in the weighted group).
+ * min = floor − value after strip, from PoB's uncapped totals, capped at what the current item carries on that
+ * total (`totals`, #34). The gap is in the build's total but the filter is on the item's own, and anything on the
+ * build that scales the slot (chaos res doubled, resists per point of Strength) can make the gap bigger than any
+ * item can roll; capped, an item like the current one always meets it. An item that carries none of it, or a
+ * floor already failing, stays soft (its stat stays in the weighted group). No totals (an empty slot): uncapped.
  *
  * Covered: chaos res, each elemental res at its cap, attributes (all have pseudo totals on the site). Not
  * covered: spell block (no pseudo total; the floor check after the swap still applies) and max res (not a
  * hard need in PLAN).
  */
-export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped: PobStats): SearchRequirement[] {
-    const needs: SearchRequirement[] = [];
+export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped: PobStats, totals?: ItemTotals): SearchRequirement[] {
+    const needs: (SearchRequirement | undefined)[] = [];
     if (settings.chaosResMin !== undefined) {
         const before: number | undefined = stat(baseline, 'ChaosResist');
         const after: number | undefined = stat(stripped, 'ChaosResist');
@@ -356,7 +296,7 @@ export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped
             before >= settings.chaosResMin &&
             after < settings.chaosResMin
         ) {
-            needs.push(need(RES_STAT.Chaos, settings.chaosResMin - total, 'chaos res'));
+            needs.push(need(RES_STAT.Chaos, settings.chaosResMin - total, 'chaos res', totals, 'Chaos'));
         }
     }
     if (settings.elementalResCapped === true) {
@@ -366,7 +306,7 @@ export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped
             const max: number | undefined = maxRes(stripped, el);
             const total: number | undefined = stat(stripped, `${el}ResistTotal`);
             if (missingBefore === 0 && missingAfter !== undefined && missingAfter > 0 && max !== undefined && total !== undefined) {
-                needs.push(need(RES_STAT[el], max - total, `${el.toLowerCase()} res`));
+                needs.push(need(RES_STAT[el], max - total, `${el.toLowerCase()} res`, totals, el));
             }
         }
     }
@@ -377,17 +317,17 @@ export function stripNeeds(settings: FloorSettings, baseline: PobStats, stripped
             const hasAfter: number | undefined = stat(stripped, a);
             const reqAfter: number = stat(stripped, `Req${a}`) ?? 0;
             if (hadBefore !== undefined && hasAfter !== undefined && hadBefore >= reqBefore && hasAfter < reqAfter) {
-                needs.push(need(`pseudo.pseudo_total_${ATTRIBUTE_NAMES[a]}`, reqAfter - hasAfter, ATTRIBUTE_NAMES[a]));
+                needs.push(need(`pseudo.pseudo_total_${ATTRIBUTE_NAMES[a]}`, reqAfter - hasAfter, ATTRIBUTE_NAMES[a], totals, a));
             }
         }
     }
-    return needs;
+    return needs.filter((n: SearchRequirement | undefined): n is SearchRequirement => n !== undefined);
 }
 
-/** v1's requirement source (v2 adds the user's). */
-export const stripNeedsSource: RequirementSource = {
+/** The build's hard needs, from stripping the slot. */
+export const stripNeedsSource: SpecSource = {
     id: 'strip-needs',
-    requirementsFor(context: RunContext): readonly SearchRequirement[] {
-        return stripNeeds(context.floors, context.baseline, context.stripped);
+    contribute(context: RunContext): SpecContribution {
+        return { requirements: stripNeeds(context.floors, context.baseline, context.stripped, context.itemTotals) };
     },
 };

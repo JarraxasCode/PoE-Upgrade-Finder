@@ -1,0 +1,14 @@
+{
+  "name": "@poe-upgrade-finder/vocab",
+  "version": "0.1.0",
+  "private": true,
+  "description": "The shared vocabulary: slots, item types, the slot plan, influences, defences and other literals. No dependencies, no Node or DOM code.",
+  "license": "MIT",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc -p tsconfig.json"
+  }
+}

@@ -3,12 +3,13 @@
 
 import { signal } from '@preact/signals';
 import type { Signal } from '@preact/signals';
-import type { BuildSettings, GearSlot, SlotPlan, WeightPreview } from '@poe-upgrade-finder/ipc';
+import type { BuildSettings, WeightPreview } from '@poe-upgrade-finder/ipc';
 import { call } from '../api.ts';
-import { buildSettings, rememberForBuild } from './builds.ts';
+import { buildSettings, buildsList, saveForBuild } from './builds.ts';
 import { readyValue } from './loadable.ts';
 import { isEmptySlotPlan, planFor } from './plan.ts';
 import { messageOf } from '@poe-upgrade-finder/validate';
+import type { GearSlot, SlotPlan, WeightEdit, WeightEdits } from '@poe-upgrade-finder/vocab';
 
 export type PreviewState =
     | { readonly kind: 'idle' }
@@ -23,9 +24,15 @@ export function previewKey(buildId: string, slot: GearSlot, target: string): str
     return `${previewBaseKey(buildId, slot, target)}|${JSON.stringify(planFor(slot))}`;
 }
 
-/** The key without the plan: a review for it is worth keeping on screen while a plan edit reloads it. */
+/**
+ * The key without the plan: a review for it is worth keeping on screen while a plan edit reloads it. PoB's
+ * weights change with the blend and the save too (#111), so both are in it; the save by its time, which main's
+ * builds-changed event updates when PoB writes it again.
+ */
 export function previewBaseKey(buildId: string, slot: GearSlot, target: string): string {
-    return `${buildId}|${slot}|${target}`;
+    const blend: number | undefined = readyValue(buildSettings.value)?.blend;
+    const saved: number | undefined = readyValue(buildsList.value)?.builds.find((b) => b.id === buildId)?.modifiedMs;
+    return `${buildId}|${slot}|${target}|${blend ?? ''}|${saved ?? ''}`;
 }
 
 /** Asks main for PoB's weights (the generator, about 1 s, cached after). Only the latest request lands. */
@@ -55,23 +62,23 @@ export async function loadWeightPreview(buildId: string, slot: GearSlot, target:
 }
 
 /** The edits for a slot, from the selected build's settings. */
-export function editsFor(slot: GearSlot): Readonly<Record<string, number>> {
+export function editsFor(slot: GearSlot): WeightEdits {
     return readyValue(buildSettings.value)?.weightEdits[slot] ?? {};
 }
 
-/** Sets one stat's edit (undefined clears it: back to PoB's weight). Saved per build at once. */
-export function setWeightEdit(slot: GearSlot, statId: string, weight: number | undefined): void {
+/** Sets one stat's edit (undefined clears it: back to PoB's weight, on). Saved per build at once. */
+export function setWeightEdit(slot: GearSlot, statId: string, edit: WeightEdit | undefined): void {
     const settings: BuildSettings | undefined = readyValue(buildSettings.value);
     if (settings === undefined) {
         return;
     }
-    const next: Record<string, number> = { ...(settings.weightEdits[slot] ?? {}) };
-    if (weight === undefined) {
+    const next: Record<string, WeightEdit> = { ...(settings.weightEdits[slot] ?? {}) };
+    if (edit === undefined) {
         delete next[statId];
     } else {
-        next[statId] = weight;
+        next[statId] = edit;
     }
-    void rememberForBuild({ weightEdits: { ...settings.weightEdits, [slot]: next } });
+    void saveForBuild({ weightEdits: { ...settings.weightEdits, [slot]: next } });
 }
 
 export function resetWeightEdits(slot: GearSlot): void {
@@ -79,7 +86,7 @@ export function resetWeightEdits(slot: GearSlot): void {
     if (settings === undefined) {
         return;
     }
-    const next: Partial<Record<GearSlot, Readonly<Record<string, number>>>> = { ...settings.weightEdits };
+    const next: Partial<Record<GearSlot, WeightEdits>> = { ...settings.weightEdits };
     delete next[slot];
-    void rememberForBuild({ weightEdits: next });
+    void saveForBuild({ weightEdits: next });
 }
