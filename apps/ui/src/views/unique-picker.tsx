@@ -4,11 +4,26 @@
 import { useEffect, useState } from 'preact/hooks';
 import type { JSX, TargetedEvent } from 'preact';
 import type { SearchedStat, UiUnique } from '@poe-upgrade-finder/ipc';
+import { uniqueTitle } from '@poe-upgrade-finder/vocab';
 import type { GearSlot, PickedUnique } from '@poe-upgrade-finder/vocab';
 import { signedPct } from '../format.ts';
 import { loadUniqueList, pickUnique, uniqueChoiceFor, uniqueList, uniqueListKey } from '../state/uniques.ts';
 
 const SHOWN: number = 30;
+
+function plainCount(all: readonly UiUnique[]): number {
+    return all.filter((u: UiUnique) => u.foulborn === null).length;
+}
+
+/** " and 13 Foulborn versions", or nothing when the item type has none (P31). */
+function foulbornText(all: readonly UiUnique[]): string {
+    const n: number = all.length - plainCount(all);
+    return n === 0 ? '' : ` and ${n} Foulborn ${n === 1 ? 'version' : 'versions'}`;
+}
+
+function titleOf(u: UiUnique): string {
+    return uniqueTitle(u.foulborn === null ? { name: u.name } : { name: u.name, foulborn: u.foulborn });
+}
 
 interface Props {
     readonly buildId: string;
@@ -61,16 +76,19 @@ export function UniquePicker(props: Props): JSX.Element {
     }
     const all: readonly UiUnique[] = state.list.uniques;
     const q: string = query.trim().toLowerCase();
-    const matching: readonly UiUnique[] = q === '' ? all : all.filter((u: UiUnique) => `${u.name} ${u.base}`.toLowerCase().includes(q));
-    // Several uniques share a name (Doryani's Delusion has three boots): a pick is its name and base.
-    const isPicked = (u: UiUnique): boolean => picked !== null && picked.name === u.name && picked.base === u.base;
+    const matching: readonly UiUnique[] =
+        q === '' ? all : all.filter((u: UiUnique) => `${titleOf(u)} ${u.base} ${u.foulbornLine ?? ''}`.toLowerCase().includes(q));
+    // Several uniques share a name (Doryani's Delusion has three boots), and each Foulborn version is its own pick
+    // (P31): a pick is its name, base and mutated mod.
+    const isPicked = (u: UiUnique): boolean =>
+        picked !== null && picked.name === u.name && picked.base === u.base && (picked.foulborn ?? null) === u.foulborn;
     const chosen: UiUnique | undefined = all.find(isPicked);
     return (
         <div class="card unique-card">
             <h2>Pick a unique</h2>
             <p class="muted small">
-                {all.length} {itemType.toLowerCase()} uniques, by PoB's estimate of a top-rolled copy against your item. The run finds the
-                best-value copies of the one you pick.
+                {plainCount(all)} {itemType.toLowerCase()} uniques{foulbornText(all)}, by PoB's estimate of a top-rolled copy against your
+                item. The run finds the best-value copies of the one you pick.
             </p>
             <input
                 type="search"
@@ -83,18 +101,23 @@ export function UniquePicker(props: Props): JSX.Element {
             />
             <ul class="unique-list" role="listbox" aria-label={`${itemType} uniques`}>
                 {matching.slice(0, SHOWN).map((u: UiUnique) => (
-                    <li key={`${u.name}|${u.base}`}>
+                    <li key={`${u.name}|${u.base}|${u.foulborn ?? ''}`}>
                         <button
                             type="button"
                             role="option"
                             aria-selected={isPicked(u)}
                             class={`unique-row${isPicked(u) ? ' on' : ''}`}
                             onClick={() => {
-                                pickUnique(slot, { name: u.name, base: u.base, tradeType: u.tradeType });
+                                pickUnique(slot, {
+                                    name: u.name,
+                                    base: u.base,
+                                    tradeType: u.tradeType,
+                                    ...(u.foulborn === null ? {} : { foulborn: u.foulborn }),
+                                });
                             }}
                         >
-                            <span class="r-unique unique-name">{u.name}</span>
-                            <span class="muted small">{u.base}</span>
+                            <span class="r-unique unique-name">{titleOf(u)}</span>
+                            <span class="muted small">{u.foulbornLine === null ? u.base : `${u.base} · ${u.foulbornLine}`}</span>
                             <span class={`num ${u.changePct > 0 ? 'pass' : 'muted'}`}>{signedPct(u.changePct)}</span>
                         </button>
                     </li>
@@ -104,7 +127,13 @@ export function UniquePicker(props: Props): JSX.Element {
             {matching.length === 0 && <p class="muted small">No unique matches that.</p>}
             {chosen !== undefined && (
                 <div class="unique-weights">
-                    <h3>{chosen.name}</h3>
+                    <h3>{titleOf(chosen)}</h3>
+                    {chosen.foulbornLine !== null && (
+                        <p class="muted small">
+                            Foulborn copies only, with {chosen.foulbornLine} in place of the unique's own line. Other Foulborn versions and
+                            plain copies are left out.
+                        </p>
+                    )}
                     <Weights unique={chosen} />
                 </div>
             )}

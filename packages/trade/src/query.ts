@@ -56,7 +56,7 @@ export interface SearchFilters {
     readonly req_filters?: { readonly filters: { readonly lvl?: { readonly max: number } } };
     readonly trade_filters: { readonly filters: { readonly price: PriceFilter } };
     /** Influence filters (slot plan, Phase 6), e.g. `{ shaper_item: { option: 'true' } }`. */
-    readonly misc_filters?: { readonly filters: Readonly<Record<string, { readonly option: 'true' }>> };
+    readonly misc_filters?: { readonly filters: Readonly<Record<string, { readonly option: 'true' | 'false' }>> };
 }
 
 export interface SearchQuery {

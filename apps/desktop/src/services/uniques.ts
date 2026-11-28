@@ -111,6 +111,8 @@ export class UniqueService {
                 weights: [...u.weights]
                     .sort((a: UniqueWeight, b: UniqueWeight) => Math.abs(b.weight) - Math.abs(a.weight))
                     .map((w: UniqueWeight): SearchedStat => ({ statId: w.id, label: label(w.id), weight: w.weight })),
+                foulborn: u.foulborn?.modId ?? null,
+                foulbornLine: u.foulborn?.line ?? null,
             }));
         return { buildId: buildId, slot: slot, target: targetId, itemType: itemType, cached: result.cached, uniques: uniques };
     }

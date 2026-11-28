@@ -32,6 +32,7 @@ function kaom(): UniqueInfo {
         rolls: [],
         statIds: [],
         unmatched: [],
+        foulborn: null,
     };
 }
 

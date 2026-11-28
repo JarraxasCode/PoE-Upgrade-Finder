@@ -125,6 +125,16 @@ export interface PickedUnique {
     readonly base: string;
     /** The site's name for the base (the search's `type`), from the engine. */
     readonly tradeType: string;
+    /**
+     * A Foulborn version (pob-internals P31): PoB's id of the mutated mod, e.g. "MutatedUniqueBootsStr2Strength".
+     * Missing: the unique itself, and the search leaves Foulborn copies out.
+     */
+    readonly foulborn?: string;
+}
+
+/** How a picked unique reads: "Kaom's Roots", or "Foulborn Kaom's Roots" for a Foulborn version (as PoB titles it). */
+export function uniqueTitle(unique: Pick<PickedUnique, 'name' | 'foulborn'>): string {
+    return unique.foulborn === undefined ? unique.name : `Foulborn ${unique.name}`;
 }
 
 export interface SlotPlan {

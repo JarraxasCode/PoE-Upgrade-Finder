@@ -94,9 +94,9 @@ export interface UniquesKey {
 
 /**
  * Bumped when the uniques command's output or rules change without the PoB version changing. 2: a line's site
- * value counts only the site's "#" numbers, and `rolls` was added (#113 review).
+ * value counts only the site's "#" numbers, and `rolls` was added (#113 review). 3: Foulborn versions (`foulborn`).
  */
-const UNIQUES_DATA: number = 2;
+const UNIQUES_DATA: number = 3;
 
 export function uniquesKey(key: UniquesKey): string {
     const text: string = JSON.stringify([

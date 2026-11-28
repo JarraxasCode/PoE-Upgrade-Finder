@@ -43,6 +43,7 @@ export {
     SOCKET_ROWS,
     socketRowText,
     UNIQUE_MODES,
+    uniqueTitle,
 } from './plan.ts';
 export type {
     AffixLimits,

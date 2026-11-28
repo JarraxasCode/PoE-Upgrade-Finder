@@ -7,6 +7,7 @@ import { categoryOf } from '@poe-upgrade-finder/vocab';
 import { PSEUDO_TOTALS } from './pseudo-totals.ts';
 import type { PseudoSource, PseudoTotal } from './pseudo-totals.ts';
 import type { RunContext, SearchRequirement, SpecContribution, SpecSource, WeightedStat } from './spec.ts';
+import type { PickedUnique } from '@poe-upgrade-finder/vocab';
 
 export class UniqueSource implements SpecSource {
     public readonly id: string = 'unique';
@@ -25,10 +26,23 @@ export class UniqueSource implements SpecSource {
             .sort((a: WeightedStat, b: WeightedStat) => Math.abs(b.weight) - Math.abs(a.weight));
         // An item type with no category of its own (none for a unique's base) keeps PoB's.
         const category: string | undefined = categoryOf(this.itemType);
+        const foulborn = this.unique.foulborn;
+        const unique: PickedUnique = {
+            name: this.unique.name,
+            base: this.unique.base,
+            tradeType: this.unique.tradeType,
+            ...(foulborn === null ? {} : { foulborn: foulborn.modId }),
+        };
+        // A Foulborn version's mutated line tells it from the unique's other Foulborn versions on the site (P31).
+        const requirements: SearchRequirement[] =
+            foulborn?.statId === undefined
+                ? []
+                : [{ statId: foulborn.statId, origin: 'plan', label: `Required: Foulborn ${foulborn.line}, from plan` }];
         return {
             weights: weights,
             rarity: 'unique',
-            unique: { name: this.unique.name, base: this.unique.base, tradeType: this.unique.tradeType },
+            unique: unique,
+            requirements: requirements,
             ...(category === undefined ? {} : { category: category }),
         };
     }

@@ -10,15 +10,17 @@ import type { GearSlot, PickedUnique } from '@poe-upgrade-finder/vocab';
 import { UserFacingError } from '../ui/user-facing-error.ts';
 
 /**
- * The picked unique in PoB's list for the item type, by name and base (several share a name: Doryani's Delusion
- * has three boots); a user-facing error when PoB has none.
+ * The picked unique in PoB's list for the item type, by name, base (several share a name: Doryani's Delusion has
+ * three boots) and Foulborn version (its mutated mod, P31); a user-facing error when PoB has none.
  */
 export function pickedUnique(data: UniquesData, picked: PickedUnique): UniqueInfo {
-    const found: UniqueInfo | undefined = data.uniques.find((u: UniqueInfo) => u.name === picked.name && u.base === picked.base);
+    const foulborn: string | null = picked.foulborn ?? null;
+    const found: UniqueInfo | undefined = data.uniques.find(
+        (u: UniqueInfo) => u.name === picked.name && u.base === picked.base && (u.foulborn?.modId ?? null) === foulborn,
+    );
     if (found === undefined) {
-        throw new UserFacingError(
-            `PoB has no unique named ${picked.name} (${picked.base}) for ${data.itemType}. Pick it again in the list.`,
-        );
+        const name: string = foulborn === null ? picked.name : `Foulborn ${picked.name}`;
+        throw new UserFacingError(`PoB has no unique named ${name} (${picked.base}) for ${data.itemType}. Pick it again in the list.`);
     }
     return found;
 }

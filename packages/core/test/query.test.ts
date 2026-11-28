@@ -202,8 +202,28 @@ test('a unique search sends its name, the site base name and rarity unique, sort
     assert.equal(q.body.query.type, 'Titan Greaves');
     assert.deepEqual(q.body.query.filters.type_filters.filters.rarity, { option: 'unique' });
     assert.deepEqual(q.body.sort, { 'statgroup.0': 'desc' });
-    // V29 measured 64 for one weight, name, type and a price; the prediction stays at or above it.
-    assert.equal(q.complexity, 65);
+    // V29 measured 64 for one weight, name, type and a price; the prediction stays at or above it, plus the
+    // Foulborn filter (one misc filter, like an influence).
+    assert.equal(q.complexity, 66);
+    // The unique itself: no Foulborn copies (pob-internals P31).
+    assert.deepEqual(q.body.query.filters.misc_filters, { filters: { foulborn_item: { option: 'false' } } });
+});
+
+test('a Foulborn version is searched as Foulborn copies with its mutated line required', () => {
+    const spec: SlotSearchSpec = {
+        ...uniqueSpec([{ statId: 'explicit.stat_4080418644', weight: 0.1 }]),
+        unique: { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves', foulborn: 'MutatedUniqueBootsStr2Strength' },
+        requirements: [
+            { statId: 'explicit.stat_4080418644', origin: 'plan', label: 'Required: Foulborn +(150-200) to Strength, from plan' },
+        ],
+    };
+    const q: CompiledQuery = compileQuery(spec, SEARCH);
+    assert.equal(q.body.query.name, "Kaom's Roots");
+    assert.deepEqual(q.body.query.filters.misc_filters, { filters: { foulborn_item: { option: 'true' } } });
+    assert.deepEqual(
+        q.body.query.stats.find((g) => g.type === 'and'),
+        { type: 'and', filters: [{ id: 'explicit.stat_4080418644', value: {} }] },
+    );
 });
 
 test('a unique with nothing to weigh is searched cheapest first, with no weighted group', () => {

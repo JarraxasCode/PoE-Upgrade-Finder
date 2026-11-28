@@ -167,6 +167,10 @@ export interface UiUnique {
     readonly changePct: number;
     /** Heaviest first; empty when no rolling line helps (the search then goes cheapest first). */
     readonly weights: readonly SearchedStat[];
+    /** A Foulborn version (pob-internals P31): PoB's id of the mutated mod; null for the unique itself. */
+    readonly foulborn: string | null;
+    /** The mutated line as PoB has it ("+(150-200) to Strength"); null for the unique itself. */
+    readonly foulbornLine: string | null;
 }
 
 /** The uniques PoB knows for a slot's item type, best estimated change first. */
@@ -188,6 +192,8 @@ function uiUnique(value: unknown, path: string): UiUnique {
         change: finite(r['change'], `${path}.change`),
         changePct: finite(r['changePct'], `${path}.changePct`),
         weights: array(r['weights'], `${path}.weights`, searchedStat),
+        foulborn: r['foulborn'] === null ? null : string(r['foulborn'], `${path}.foulborn`),
+        foulbornLine: r['foulbornLine'] === null ? null : string(r['foulbornLine'], `${path}.foulbornLine`),
     };
 }
 

@@ -44,6 +44,7 @@ export type {
     StripItemTotals,
     TargetRequest,
     TradeQueryData,
+    UniqueFoulborn,
     UniqueInfo,
     UniqueRoll,
     UniquesData,

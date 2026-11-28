@@ -603,6 +603,18 @@ export interface UniqueInfo {
     readonly statIds: readonly string[];
     /** Rolling lines with no trade stat id. */
     readonly unmatched: readonly string[];
+    /** Set on a Foulborn version of the unique (one line mutated, pob-internals P31); null on the unique itself. */
+    readonly foulborn: UniqueFoulborn | null;
+}
+
+/** Which Foulborn version: the mutated mod PoB swapped in. */
+export interface UniqueFoulborn {
+    /** PoB's id of the mutated mod (data.itemMods.Foulborn), e.g. "MutatedUniqueBootsStr2Strength". */
+    readonly modId: string;
+    /** Its text as PoB has it, ranges included: "+(150-200) to Strength". */
+    readonly line: string;
+    /** Its trade stat id; undefined when the site has none (the search then gets every Foulborn version). */
+    readonly statId?: string;
 }
 
 export interface UniquesData {
@@ -639,6 +651,20 @@ function readUniqueInfo(value: unknown, path: string): UniqueInfo {
         }),
         statIds: luaArray(r['statIds'], `${path}.statIds`, string),
         unmatched: luaArray(r['unmatched'], `${path}.unmatched`, string),
+        foulborn: readUniqueFoulborn(r['foulborn'], `${path}.foulborn`),
+    };
+}
+
+function readUniqueFoulborn(value: unknown, path: string): UniqueFoulborn | null {
+    if (value === undefined || value === null) {
+        return null;
+    }
+    const r: JsonRecord = record(value, path);
+    const statId: string | undefined = optString(r, 'statId', path);
+    return {
+        modId: string(r['modId'], `${path}.modId`),
+        line: string(r['line'], `${path}.line`),
+        ...(statId === undefined ? {} : { statId: statId }),
     };
 }
 

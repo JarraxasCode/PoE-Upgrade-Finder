@@ -159,6 +159,12 @@ export const POB_HOOKS: readonly PobHook[] = [
     { file: DATA, needle: 'Explicit = LoadModule("Data/ModExplicit")', usedIn: 'slotdata' },
     { file: DATA, needle: 'ItemExclusive = LoadModule("Data/ModItemExclusive")', usedIn: 'slotdata' },
     { file: DATA, needle: 'Delve = LoadModule("Data/ModDelve")', usedIn: 'slotdata' },
+    // Foulborn versions of uniques (pob-internals P31): the mutated mods, the map, and the lines PoB marks.
+    { file: DATA, needle: 'Foulborn = LoadModule("Data/ModFoulborn")', usedIn: 'uniques' },
+    { file: DATA, needle: 'data.foulbornMap = ', usedIn: 'uniques' },
+    { file: ITEM, needle: 'function ItemClass:MutateMod(', usedIn: 'uniques' },
+    { file: ITEM, needle: 'modLine.newModId = newModId', usedIn: 'uniques' },
+    { file: ITEM, needle: 'modLine.mutated = true', usedIn: 'uniques' },
     { file: DATA, needle: 'data.masterMods = ', usedIn: 'slotdata' },
     { file: DATA, needle: 'data.essences = ', usedIn: 'slotdata' },
     { file: DATA, needle: 'data.veiledMods = ', usedIn: 'slotdata' },

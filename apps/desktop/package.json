@@ -1,7 +1,7 @@
 {
   "name": "@poe-upgrade-finder/desktop",
   "productName": "poe-upgrade-finder",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "The Electron app: main process and preload. The renderer is apps/ui.",
   "license": "MIT",

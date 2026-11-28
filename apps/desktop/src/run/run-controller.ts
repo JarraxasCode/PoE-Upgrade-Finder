@@ -72,6 +72,7 @@ import type { PreparedSlot, SlotPlanJob } from './slot-pipeline.ts';
 import {
     emptyRunCauses,
     hardNeedText,
+    uniqueHeader,
     levelFilterLabel,
     limitPanel,
     socketLabels,
@@ -689,7 +690,7 @@ export class RunController {
             // The build's hard needs only: the plan's includes are in `plan`.
             hardNeeds: spec.requirements.filter((r) => r.origin === 'strip').map(hardNeedText),
             plan: isUniquePlan(setup.plan) ? null : toUiRunPlan(setup.plan, spec, meta.planNotes),
-            unique: spec.unique?.name ?? null,
+            unique: spec.unique === null ? null : uniqueHeader(spec),
             uniqueNotes: meta.uniqueNotes,
             sockets: socketLabels(spec.sockets),
             levelFilter: levelFilterLabel(settings.levelFilter, spec.maxLevelRequirement),

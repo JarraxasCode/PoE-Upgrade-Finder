@@ -255,8 +255,34 @@ local function analyse(item, score)
 	}
 end
 
+-- The unique's Foulborn versions (pob-internals P31): one per line PoB's Foulborn map can mutate, on the current
+-- variant. Each is a copy of the unique with that line swapped by PoB's own MutateMod, so it is scored and
+-- weighted like any unique, the mutated line in the swapped one's place. `foulborn` says which version it is:
+-- the mutated mod's id, its text and its trade stat id (nil when the site has none: the search then can't tell
+-- this version from the unique's other Foulborn versions).
+local function foulbornVersions(item, score)
+	local out = {}
+	local seen = {}
+	for _, ml in ipairs(activeLines(item, item.explicitModLines)) do
+		local mod = ml.newModId and not ml.mutated and data.itemMods.Foulborn[ml.newModId]
+		if mod and not seen[ml.newModId] then
+			seen[ml.newModId] = true
+			local copy = new("Item"):Item(item:BuildRaw())
+			copy:MutateMod(ml.modId, ml.newModId, true)
+			local text = table.concat(mod, "\n")
+			local low = hasRange(mod[1]) and itemLib.applyRange(mod[1], 0) or mod[1]
+			local entry = tradeStat(low, "explicit", item.base.weapon ~= nil)
+			local info = analyse(copy, score)
+			info.name = item.title
+			info.foulborn = { modId = ml.newModId, line = text, statId = entry and entry.id or nil }
+			table.insert(out, info)
+		end
+	end
+	return out
+end
+
 -- Every unique of PoB's item type `itemType`, analysed in slot `slotName` under `resolved` (target.resolve),
--- with the generator's stat weights. Sorted by name.
+-- with the generator's stat weights, each followed by its Foulborn versions. Sorted by name.
 function uniques.list(slotName, itemType, resolved, statWeights)
 	waitForDb()
 	local slot = build.itemsTab.slots[slotName]
@@ -276,14 +302,23 @@ function uniques.list(slotName, itemType, resolved, statWeights)
 				local info = analyse(item, score)
 				info.change = info.scoreHigh - equippedScore
 				table.insert(out, info)
+				for _, version in ipairs(foulbornVersions(item, score)) do
+					version.change = version.scoreHigh - equippedScore
+					table.insert(out, version)
+				end
 			end
 		end
-		-- By name, then base: several uniques share a name (Doryani's Delusion has three boots).
+		-- By name, then base: several uniques share a name (Doryani's Delusion has three boots). The plain unique
+		-- comes before its Foulborn versions, which go by their mutated mod's id.
 		table.sort(out, function(a, b)
 			if a.name ~= b.name then
 				return a.name < b.name
 			end
-			return a.base < b.base
+			if a.base ~= b.base then
+				return a.base < b.base
+			end
+			local fa, fb = a.foulborn and a.foulborn.modId or "", b.foulborn and b.foulborn.modId or ""
+			return fa < fb
 		end)
 		return out
 	end)

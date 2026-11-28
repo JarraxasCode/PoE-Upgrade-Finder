@@ -30,6 +30,7 @@ function kaom(weights: UniqueInfo['weights'] = [{ id: LIFE, weight: 0.33, line: 
         rolls: [],
         statIds: ['explicit.stat_1493091477', LIFE, 'explicit.stat_4212255859'],
         unmatched: [],
+        foulborn: null,
     };
 }
 
@@ -103,4 +104,33 @@ test('hard-need gaps: a need no line of the unique can carry', () => {
     assert.deepEqual(uniqueNeedGaps(kaom(), [fire, life]), [fire]);
     // A plain explicit requirement counts when the unique has that stat.
     assert.deepEqual(uniqueNeedGaps(kaom(), [{ statId: LIFE, min: 1, origin: 'strip', label: 'life line' }]), []);
+});
+
+test('a Foulborn version: the pick carries its mutated mod, and its mutated line is required', () => {
+    const foul: UniqueInfo = {
+        ...kaom([{ id: 'explicit.stat_4080418644', weight: 0.1, line: '+(150-200) to Strength' }]),
+        foulborn: { modId: 'MutatedUniqueBootsStr2Strength', line: '+(150-200) to Strength', statId: 'explicit.stat_4080418644' },
+    };
+    const s: SlotSearchSpec = spec(
+        buildSlotSpec(
+            { ...UNIQUE_PLAN, unique: { ...KAOM_PICK, foulborn: 'MutatedUniqueBootsStr2Strength' } },
+            {
+                context: context(),
+                slotData: undefined,
+                unique: foul,
+            },
+        ),
+    );
+    assert.equal(s.unique?.foulborn, 'MutatedUniqueBootsStr2Strength');
+    assert.deepEqual(
+        s.requirements.filter((r) => r.origin === 'plan'),
+        [{ statId: 'explicit.stat_4080418644', origin: 'plan', label: 'Required: Foulborn +(150-200) to Strength, from plan' }],
+    );
+    // The unique itself carries no Foulborn mod and needs no line.
+    const plain: SlotSearchSpec = spec(buildSlotSpec(UNIQUE_PLAN, { context: context(), slotData: undefined, unique: kaom() }));
+    assert.equal(plain.unique?.foulborn, undefined);
+    assert.deepEqual(
+        plain.requirements.filter((r) => r.origin === 'plan'),
+        [],
+    );
 });

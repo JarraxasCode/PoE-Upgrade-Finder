@@ -34,6 +34,7 @@ import type {
     UiSearch,
 } from '@poe-upgrade-finder/ipc';
 import type { PolicySnapshot, TradePolicy } from '@poe-upgrade-finder/trade';
+import { uniqueTitle } from '@poe-upgrade-finder/vocab';
 import type { LevelFilter, SlotInfluence, SlotPlan } from '@poe-upgrade-finder/vocab';
 
 function pct(n: number): number | null {
@@ -104,6 +105,21 @@ function socketCheck(s: SocketMatch): UiPlanCheck {
     return { kind: 'socket', label: planRule(s.label).label, status: s.status, value: s.value, lines: [] };
 }
 
+/**
+ * The unique for the run header: its name, or a Foulborn version's title with its mutated line (P31):
+ * "Foulborn Kaom's Roots (+(150-200) to Strength)".
+ */
+export function uniqueHeader(spec: SlotSearchSpec): string {
+    if (spec.unique === null) {
+        return '';
+    }
+    const title: string = uniqueTitle(spec.unique);
+    const mutated: SearchRequirement | undefined = spec.requirements.find(
+        (r) => r.origin === 'plan' && r.label.startsWith('Required: Foulborn '),
+    );
+    return mutated === undefined ? title : `${title} (${mutated.label.replace(/^Required: Foulborn /, '').replace(/, from plan$/, '')})`;
+}
+
 /** A hard need for the run header: "chaos res ≥ 22", and the gap it came from when it was capped (#34). */
 export function hardNeedText(r: SearchRequirement): string {
     const text: string = r.label.replace(/^Required: /, '').replace(/, from strip$/, '');
@@ -142,7 +158,7 @@ export function emptyRunCauses(spec: SlotSearchSpec): string[] {
         causes.push(`${spec.influences.map((i: SlotInfluence) => INFLUENCE_NAMES[i]).join(' and ')} influence`);
     }
     if (spec.unique !== null) {
-        causes.push(`the unique ${spec.unique.name}`);
+        causes.push(`the unique ${uniqueTitle(spec.unique)}`);
     }
     if (spec.maxLevelRequirement !== undefined) {
         causes.push(`up to level ${spec.maxLevelRequirement}`);

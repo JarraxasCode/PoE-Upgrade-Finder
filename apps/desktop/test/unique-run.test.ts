@@ -21,6 +21,7 @@ function kaom(): UniqueInfo {
         rolls: [],
         statIds: [LIFE],
         unmatched: [],
+        foulborn: null,
     };
 }
 
@@ -82,4 +83,19 @@ test('pickedUnique: a name shared by several bases is matched on the base too', 
         () => pickedUnique(data, { name: "Doryani's Delusion", base: 'Titan Greaves', tradeType: 'Titan Greaves' }),
         /PoB has no unique/,
     );
+});
+
+test('pickedUnique: the unique and each Foulborn version are told apart by the mutated mod (pob-internals P31)', () => {
+    const foul: UniqueInfo = {
+        ...kaom(),
+        foulborn: { modId: 'MutatedUniqueBootsStr2Strength', line: '+(150-200) to Strength', statId: 'explicit.stat_4080418644' },
+    };
+    const data: UniquesData = { ...DATA, uniques: [kaom(), foul] };
+    const pick = { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves' } as const;
+    assert.equal(pickedUnique(data, pick).foulborn, null);
+    assert.equal(
+        pickedUnique(data, { ...pick, foulborn: 'MutatedUniqueBootsStr2Strength' }).foulborn?.modId,
+        'MutatedUniqueBootsStr2Strength',
+    );
+    assert.throws(() => pickedUnique(data, { ...pick, foulborn: 'MutatedGone' }), /Foulborn Kaom's Roots/);
 });

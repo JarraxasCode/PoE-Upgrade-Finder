@@ -347,6 +347,18 @@ test('uniques.list: names a build, slot, target and item type; the result is che
                 change: -78,
                 changePct: -5.2,
                 weights: [{ statId: 'explicit.stat_3299347043', label: '+# to maximum Life', weight: 0.33 }],
+                foulborn: null,
+                foulbornLine: null,
+            },
+            {
+                name: "Kaom's Roots",
+                base: 'Titan Greaves',
+                tradeType: 'Titan Greaves',
+                change: -60,
+                changePct: -4,
+                weights: [],
+                foulborn: 'MutatedUniqueBootsStr2Strength',
+                foulbornLine: '+(150-200) to Strength',
             },
         ],
     };

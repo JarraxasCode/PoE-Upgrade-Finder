@@ -182,6 +182,7 @@ const UNIQUES: UniquesData = {
             rolls: [],
             statIds: ['explicit.stat_3299347043'],
             unmatched: [],
+            foulborn: null,
         },
     ],
 };

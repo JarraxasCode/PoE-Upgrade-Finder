@@ -154,13 +154,18 @@ function socketFilterRows(sockets: readonly SearchSockets[]): Partial<Record<Soc
 export function compileQuery(spec: SlotSearchSpec, search: BandSearch, limit: number = COMPLEXITY_LIMIT): CompiledQuery {
     const andFilters: readonly StatFilter[] = requirementFilters(spec.requirements);
     const required: number = andFilters.length;
-    const influences: Record<string, { readonly option: 'true' }> = influenceFilters(spec.influences);
+    const misc: Record<string, { readonly option: 'true' | 'false' }> = { ...influenceFilters(spec.influences) };
+    if (spec.unique !== null) {
+        // The unique itself leaves Foulborn copies out; a Foulborn version takes only them (pob-internals P31).
+        misc['foulborn_item'] = { option: spec.unique.foulborn === undefined ? 'false' : 'true' };
+    }
     const defences: Record<string, { readonly min?: number; readonly max?: number }> = defenceFilters(spec.defences);
     const plan: PlanCost = {
         excluded: spec.exclusions.length,
         // A unique's name and base cost no more than a base alone (V29: 64 for one weight and a price).
         typed: spec.baseType !== null || spec.unique !== null,
-        influences: Object.keys(influences).length,
+        // Every misc filter, influences and Foulborn alike (each assumed to cost what an influence does).
+        influences: Object.keys(misc).length,
         defences: Object.keys(defences).length,
         sockets: spec.sockets.length,
     };
@@ -192,7 +197,7 @@ export function compileQuery(spec: SlotSearchSpec, search: BandSearch, limit: nu
         ...(plan.defences === 0 ? {} : { armour_filters: { filters: defences } }),
         ...(spec.sockets.length === 0 ? {} : { socket_filters: { filters: socketFilterRows(spec.sockets) } }),
         trade_filters: { filters: { price: price } },
-        ...(plan.influences === 0 ? {} : { misc_filters: { filters: influences } }),
+        ...(plan.influences === 0 ? {} : { misc_filters: { filters: misc } }),
     };
     const query: SearchQuery = {
         status: { option: spec.listingType },

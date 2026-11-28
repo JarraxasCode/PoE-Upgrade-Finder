@@ -247,13 +247,14 @@ export function readSlotPlan(value: unknown, path: string): SlotPlan {
     };
 }
 
-/** A picked unique (#113): PoB's name and base, and the site's base name; each non-empty. */
+/** A picked unique (#113): PoB's name and base, the site's base name, and a Foulborn version's mutated mod; each non-empty. */
 export function readPickedUnique(value: unknown, path: string): PickedUnique {
-    const r: JsonRecord = exactKeys(value, path, ['name', 'base', 'tradeType']);
+    const r: JsonRecord = exactKeys(value, path, ['name', 'base', 'tradeType', 'foulborn']);
     return {
         name: shortText(r['name'], `${path}.name`, 120),
         base: shortText(r['base'], `${path}.base`, 120),
         tradeType: shortText(r['tradeType'], `${path}.tradeType`, 120),
+        ...(r['foulborn'] === undefined ? {} : { foulborn: shortText(r['foulborn'], `${path}.foulborn`, 120) }),
     };
 }
 

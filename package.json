@@ -1,6 +1,6 @@
 {
   "name": "poe-upgrade-finder",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "private": true,
   "description": "Finds rare gear upgrades for a Path of Building build on the official trade site and scores them in headless PoB.",
   "license": "MIT",

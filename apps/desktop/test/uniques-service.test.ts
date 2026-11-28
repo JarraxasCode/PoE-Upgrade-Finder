@@ -30,7 +30,7 @@ const HASH: string = createHash('sha1').update(XML).digest('hex');
 const LIFE: string = 'explicit.stat_3299347043';
 
 function data(): UniquesData {
-    const base = { variant: null, variants: 1, scoreLow: 1, scoreMid: 1, rolls: [], statIds: [], unmatched: [] };
+    const base = { variant: null, variants: 1, scoreLow: 1, scoreMid: 1, rolls: [], statIds: [], unmatched: [], foulborn: null };
     return {
         slot: 'Boots',
         itemType: 'Boots',

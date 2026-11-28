@@ -8,6 +8,7 @@ import {
     defenceValue,
     emptyRunCauses,
     hardNeedText,
+    uniqueHeader,
     levelFilterLabel,
     planChecks,
     planRule,
@@ -185,4 +186,22 @@ test('an empty run lists what narrowed its search, in the order the header shows
         unique: { name: "Kaom's Roots" },
     };
     assert.deepEqual(emptyRunCauses(unique as unknown as SlotSearchSpec), ["the unique Kaom's Roots"]);
+});
+
+test('the run header names a Foulborn version with its mutated line (P31)', () => {
+    const kaom = { name: "Kaom's Roots", base: 'Titan Greaves', tradeType: 'Titan Greaves' };
+    const plain = { unique: kaom, requirements: [], listingType: 'online', baseType: null, defences: [], sockets: [], influences: [] };
+    assert.equal(uniqueHeader(plain as unknown as SlotSearchSpec), "Kaom's Roots");
+    const foul = {
+        ...plain,
+        unique: { ...kaom, foulborn: 'MutatedUniqueBootsStr2Strength' },
+        requirements: [
+            { statId: 'explicit.stat_4080418644', origin: 'plan', label: 'Required: Foulborn +(150-200) to Strength, from plan' },
+        ],
+    };
+    assert.equal(uniqueHeader(foul as unknown as SlotSearchSpec), "Foulborn Kaom's Roots (+(150-200) to Strength)");
+    assert.deepEqual(emptyRunCauses(foul as unknown as SlotSearchSpec), [
+        'Foulborn +(150-200) to Strength',
+        "the unique Foulborn Kaom's Roots",
+    ]);
 });
